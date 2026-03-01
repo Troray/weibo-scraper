@@ -7,7 +7,7 @@ from playwright.sync_api import sync_playwright
 from utils import parse_weibo_time
 
 # --- 配置区域 ---
-TARGET_USER_ID = "7928198622"  # 替换为目标用户的 ID
+TARGET_USER_ID = "12345678"  # 替换为目标用户的 ID
 START_DATE = "2025-09-01"      # 抓取开始日期
 END_DATE = "2025-12-31"        # 抓取结束日期
 OUTPUT_DIR = "output"
