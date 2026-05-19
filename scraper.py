@@ -8,8 +8,8 @@ from utils import parse_weibo_time
 
 # --- 配置区域 ---
 TARGET_USER_ID = "7928198622"  # 替换为目标用户的 ID
-START_DATE = "2025-09-01"      # 抓取开始日期
-END_DATE = "2025-12-31"        # 抓取结束日期
+START_DATE = "2026-05-19"      # 抓取开始日期
+END_DATE = "2026-05-19"        # 抓取结束日期
 OUTPUT_DIR = "output"
 STATE_FILE = "state.json"
 # ----------------
@@ -175,6 +175,18 @@ def scrape_weibo_search():
                             if not date_match:
                                 # 匹配 "2023年10月04日"
                                 date_match = re.search(r"(\d{4}年\d{1,2}月\d{1,2}日)", card_text)
+                            if not date_match:
+                                # 匹配 "今天 HH:MM" 或 "今天HH:MM"
+                                date_match = re.search(r"(今天\s*\d{1,2}:\d{2})", card_text)
+                            if not date_match:
+                                # 匹配 "x分钟前"
+                                date_match = re.search(r"(\d+分钟前)", card_text)
+                            if not date_match:
+                                # 匹配 "x小时前"
+                                date_match = re.search(r"(\d+小时前)", card_text)
+                            if not date_match:
+                                # 匹配 "刚刚"
+                                date_match = re.search(r"(刚刚)", card_text)
                             
                             if date_match:
                                 time_str = date_match.group(1)

@@ -38,6 +38,15 @@ def parse_weibo_time(time_str, reference_date=None):
         hours = int(match.group(1))
         return now - timedelta(hours=hours)
 
+    # 今天 HH:MM
+    if "今天" in time_str:
+        time_part = time_str.replace("今天", "").strip()
+        try:
+            t = datetime.strptime(time_part, "%H:%M")
+            return now.replace(hour=t.hour, minute=t.minute, second=0, microsecond=0)
+        except ValueError:
+            pass
+
     # 昨天 HH:MM
     if "昨天" in time_str:
         time_part = time_str.replace("昨天", "").strip()
