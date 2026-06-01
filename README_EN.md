@@ -129,3 +129,9 @@ You know I’ll always be with you, baby🩹❤️
 - `images` (Text): Local image file paths or large image CDN urls (comma-separated).
 - `videos` (Text): Official permanent webpage URLs of videos (avoiding token timeouts).
 - `livephotos` (Text): Extracted Live Photo URLs (JSON string).
+
+---
+
+## 💡 Acknowledgement
+
+This project is a secondary development based on [Zhangziqiang997/weibo-scraper](https://github.com/Zhangziqiang997/weibo-scraper). We would like to express our sincere gratitude to the original author for their outstanding open-source contribution!

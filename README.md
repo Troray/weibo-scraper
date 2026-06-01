@@ -130,3 +130,10 @@ You know I’ll always be with you, baby🩹❤️
 - `images` (文本): 采集到的本地图片路径，或大图 CDN URL (逗号分割)
 - `videos` (文本): 保存的官方永久视频播放页地址 (防盗链接防失效)
 - `livephotos` (文本): 采集到的实况照片视频 URL (JSON)
+
+---
+
+## 💡 致谢
+
+本项目基于 [Zhangziqiang997/weibo-scraper](https://github.com/Zhangziqiang997/weibo-scraper) 项目进行二次开发，在此对原作者的优秀开源工作表示衷心的感谢！
+
