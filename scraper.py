@@ -29,6 +29,7 @@ ENABLE_SAVE_CSV = config.ENABLE_SAVE_CSV
 ENABLE_SAVE_SQLITE = config.ENABLE_SAVE_SQLITE
 ENABLE_SAVE_MARKDOWN = config.ENABLE_SAVE_MARKDOWN
 ONLY_ORIGINAL = config.ONLY_ORIGINAL
+INCREMENTAL_LOOKBACK_DAYS = getattr(config, "INCREMENTAL_LOOKBACK_DAYS", 5)
 # ----------------
 
 
@@ -485,6 +486,64 @@ def update_userid_file(file_path, user_id, username, timestamp_str):
     print(f"✅ 已更新 {file_path} 中的用户 {user_id} ({username}) 时间戳为 {timestamp_str}")
 
 
+def load_existing_post_ids(user_name):
+    """
+    从 SQLite, CSV 或 Markdown 中加载已经抓取过的微博 ID，用于增量去重判定
+    """
+    scraped_ids = set()
+    user_dir = os.path.join(OUTPUT_DIR, user_name)
+    if not os.path.exists(user_dir):
+        return scraped_ids
+
+    # 1. 从 SQLite 读取
+    db_path = os.path.join(user_dir, "posts.db")
+    if ENABLE_SAVE_SQLITE and os.path.exists(db_path):
+        try:
+            import sqlite3
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='posts'")
+            if cursor.fetchone():
+                cursor.execute("SELECT id FROM posts")
+                for row in cursor.fetchall():
+                    if row[0]:
+                        scraped_ids.add(str(row[0]).strip())
+            conn.close()
+            print(f"ℹ️ 从 SQLite 加载了 {len(scraped_ids)} 个已抓取的微博 ID")
+        except Exception as e:
+            print(f"⚠️ 从 SQLite 加载已抓取 ID 失败: {e}")
+
+    # 2. 从 CSV 读取 (作为补充或在 SQLite 禁用时使用)
+    csv_path = os.path.join(user_dir, "posts.csv")
+    if ENABLE_SAVE_CSV and os.path.exists(csv_path):
+        try:
+            df = pd.read_csv(csv_path, dtype={"id": str})
+            if "id" in df.columns:
+                for val in df["id"].dropna():
+                    scraped_ids.add(str(val).strip())
+            print(f"ℹ️ 从 CSV 加载后，共有 {len(scraped_ids)} 个已抓取的微博 ID")
+        except Exception as e:
+            print(f"⚠️ 从 CSV 加载已抓取 ID 失败: {e}")
+
+    # 3. 从 Markdown 文件读取 (如果 SQLite 和 CSV 都没启用，或者作为最后的兜底)
+    if not scraped_ids and ENABLE_SAVE_MARKDOWN:
+        try:
+            for root, dirs, files in os.walk(user_dir):
+                for file in files:
+                    if file.endswith(".md"):
+                        md_path = os.path.join(root, file)
+                        posts = parse_markdown_posts(md_path)
+                        for p in posts:
+                            if p.get("id"):
+                                scraped_ids.add(str(p["id"]).strip())
+            if scraped_ids:
+                print(f"ℹ️ 从 Markdown 文件加载了 {len(scraped_ids)} 个已抓取的微博 ID")
+        except Exception as e:
+            print(f"⚠️ 从 Markdown 加载已抓取 ID 失败: {e}")
+
+    return scraped_ids
+
+
 def scrape_weibo_search():
     if not os.path.exists(STATE_FILE):
         print(f"错误: 未找到 {STATE_FILE}。请先运行 login.py 进行登录。")
@@ -510,12 +569,16 @@ def scrape_weibo_search():
             # 自动获取用户昵称
             user_name = fetch_user_name(page, user_id)
             
+            # 加载已存在的微博 ID 进行增量去重判定
+            scraped_ids = load_existing_post_ids(user_name)
+            
             # 记录本次抓取的起始时间点作为下一次增量的起点
             run_start_time = datetime.now().replace(microsecond=0)
             
             # 计算该用户的抓取时间范围
             if user_info["start_time"] is not None:
-                user_start_dt = user_info["start_time"]
+                # 增量抓取回溯窗口：向前推 INCREMENTAL_LOOKBACK_DAYS 天，防止因新浪微博搜索索引延迟漏掉微博
+                user_start_dt = user_info["start_time"] - timedelta(days=INCREMENTAL_LOOKBACK_DAYS)
                 user_start_date_str = user_start_dt.strftime("%Y-%m-%d")
             else:
                 user_start_dt = datetime.strptime(START_DATE, "%Y-%m-%d")
@@ -538,10 +601,8 @@ def scrape_weibo_search():
             for start_str, end_str in user_date_ranges:
                 print(f"\n=== 用户 {user_name} ({user_id}) | 开始抓取时间段: {start_str} 至 {end_str} ===")
                 
-                # 结束日期增加 1 天以解决微博搜索服务器对晚间微博的时间边界/时区偏差问题
-                end_dt = datetime.strptime(end_str, "%Y-%m-%d")
-                search_end_dt = end_dt + timedelta(days=1)
-                search_end_str = search_end_dt.strftime("%Y-%m-%d")
+                # 结束日期（在 ID 去重模式下，可直接使用 end_str，不再需要增加 1 天）
+                search_end_str = end_str
                 
                 # 构造搜索 URL
                 search_url = (
@@ -656,13 +717,21 @@ def scrape_weibo_search():
 
                             # --- 去重与时间过滤 ---
                             if post_id in processed_ids:
-                                print(f"  -> 跳过重复微博: {post_id}")
+                                print(f"  -> 跳过本次已处理的重复微博: {post_id}")
+                                continue
+                                
+                            if post_id in scraped_ids:
+                                print(f"  -> 跳过历史已抓取的微博: {post_id}")
                                 continue
                                 
                             # 严格时间范围过滤
                             if user_info["start_time"] is not None:
-                                if post_time <= user_info["start_time"]:
-                                    print(f"  -> 跳过早于或等于上次抓取截止时间 ({user_info['start_time']}) 的微博: {post_time}")
+                                # 对于增量用户，如果该微博不在已抓取列表中，只要在回溯范围之内，我们都予以抓取以防漏掉
+                                if post_time < user_start_dt:
+                                    print(f"  -> 跳过早于回溯起点 ({user_start_dt}) 的微博: {post_time}")
+                                    continue
+                                if post_time > user_end_dt:
+                                    print(f"  -> 跳过晚于本次抓取终点 ({user_end_dt}) 的微博: {post_time}")
                                     continue
                             else:
                                 if not (user_start_dt <= post_time <= user_end_dt):

@@ -3,10 +3,11 @@
 
 # --- 目标用户配置 ---
 TARGET_USER_IDS = "userid.txt"  # 支持单个 ID (如 "7928198622")、列表 (如 ["123", "456"]) 或 txt 文件路径 (如 "userid.txt")
+INCREMENTAL_LOOKBACK_DAYS = 1   # 增量爬取回溯天数。在增量抓取时，将起点向前推指定天数，以防因发布/索引延迟漏掉微博。已存在的微博会自动按 ID 去重。
 
 # --- 时间范围 ---
-START_DATE = "2025-09-09"       # 默认抓取开始日期 (格式: YYYY-MM-DD)。如果 userid.txt 中有更晚的时间，则以 userid.txt 为准
-END_DATE = "2025-09-09"         # 默认抓取结束日期 (格式: YYYY-MM-DD)。如果为空，则表示抓取到当前运行时间
+START_DATE = ""       # 默认抓取开始日期 (格式: YYYY-MM-DD)。如果 userid.txt 中有更晚的时间，则以 userid.txt 为准
+END_DATE = ""         # 默认抓取结束日期 (格式: YYYY-MM-DD)。如果为空，则表示抓取到当前运行时间
 
 # --- 保存开关 ---
 ENABLE_SAVE_IMAGES = 1          # 是否保存图片 (1 = 启用，0 = 禁用)
