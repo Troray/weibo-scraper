@@ -28,6 +28,12 @@ ENABLE_SAVE_LIVEPHOTOS = config.ENABLE_SAVE_LIVEPHOTOS
 ENABLE_SAVE_CSV = config.ENABLE_SAVE_CSV
 ENABLE_SAVE_SQLITE = config.ENABLE_SAVE_SQLITE
 ENABLE_SAVE_MARKDOWN = config.ENABLE_SAVE_MARKDOWN
+ENABLE_SAVE_JSON = getattr(config, "ENABLE_SAVE_JSON", 0)
+ENABLE_SCRAPE_COMMENTS = getattr(config, "ENABLE_SCRAPE_COMMENTS", 0)
+MAX_COMMENTS_PER_POST = getattr(config, "MAX_COMMENTS_PER_POST", 100)
+MAX_REPLIES_PER_COMMENT = getattr(config, "MAX_REPLIES_PER_COMMENT", 50)
+DOWNLOAD_MIN_MULTIPART_SIZE_MB = getattr(config, "DOWNLOAD_MIN_MULTIPART_SIZE_MB", 15)
+DOWNLOAD_NUM_THREADS = getattr(config, "DOWNLOAD_NUM_THREADS", 5)
 ONLY_ORIGINAL = config.ONLY_ORIGINAL
 INCREMENTAL_LOOKBACK_DAYS = getattr(config, "INCREMENTAL_LOOKBACK_DAYS", 5)
 # ----------------
@@ -219,9 +225,9 @@ def download_file(url, save_path, page=None):
         except Exception:
             pass
 
-    # 大于 15MB 且支持 Range 请求时使用 5 线程下载
-    MIN_MULTIPART_SIZE = 15 * 1024 * 1024
-    NUM_THREADS = 5
+    # 根据配置的大于指定大小且支持 Range 请求时使用多线程下载
+    MIN_MULTIPART_SIZE = DOWNLOAD_MIN_MULTIPART_SIZE_MB * 1024 * 1024
+    NUM_THREADS = DOWNLOAD_NUM_THREADS
     
     if support_ranges and total_size > MIN_MULTIPART_SIZE:
         print(f"检测到文件大小: {total_size / 1024 / 1024:.2f} MB，将使用 {NUM_THREADS} 线程并行下载...")
@@ -410,6 +416,220 @@ def extract_high_quality_video(detail_url, headless_browser):
             pass
         
     return best_url
+
+def scrape_replies(page, post_id, comment_id, post_author_uid=""):
+    """
+    通过微博 AJAX 接口爬取某条主评论下的楼中楼回复。
+    返回子评论列表，格式: [{"id": "...", "post_id": "...", "parent_id": "...", "time": "...", "user_id": "...", "user_name": "...", "content": "...", "like_count": 0}]
+    """
+    replies = []
+    max_id = 0
+    url_template = "https://weibo.com/ajax/statuses/buildComments?is_reload=1&id={comment_id}&is_show_bulletin=2&is_mix=1&fetch_level=1&count=20&uid={uid}"
+    
+    headers = {
+        "Referer": f"https://weibo.com/detail/{post_id}",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    
+    # 限制每个主评论最多爬取的子回复数，以防请求过多被封
+    max_replies_limit = MAX_REPLIES_PER_COMMENT
+    
+    while len(replies) < max_replies_limit:
+        url = url_template.format(comment_id=comment_id, uid=post_author_uid)
+        if max_id > 0:
+            url += f"&max_id={max_id}"
+            
+        try:
+            response = page.context.request.get(url, headers=headers)
+            if response.status != 200:
+                break
+                
+            res_json = response.json()
+            if not res_json or res_json.get("ok") != 1:
+                break
+                
+            data = res_json.get("data", [])
+            if not data:
+                break
+                
+            for item in data:
+                if len(replies) >= max_replies_limit:
+                    break
+                    
+                reply_id = str(item.get("id"))
+                reply_text_raw = item.get("text", "")
+                reply_text = re.sub(r'<[^>]+>', '', reply_text_raw).strip()
+                
+                user_info = item.get("user", {})
+                user_id = str(user_info.get("id", ""))
+                user_name = user_info.get("screen_name", "未知用户")
+                
+                created_at_str = item.get("created_at", "")
+                reply_time = ""
+                if created_at_str:
+                    try:
+                        dt = datetime.strptime(created_at_str, "%a %b %d %H:%M:%S %z %Y")
+                        reply_time = dt.strftime("%Y-%m-%d %H:%M:%S")
+                    except Exception:
+                        reply_time = str(created_at_str)
+                        
+                like_count = item.get("like_counts", 0)
+                
+                replies.append({
+                    "id": reply_id,
+                    "post_id": post_id,
+                    "parent_id": comment_id,
+                    "time": reply_time,
+                    "user_id": user_id,
+                    "user_name": user_name,
+                    "content": reply_text,
+                    "like_count": like_count
+                })
+                
+            max_id = res_json.get("max_id", 0)
+            if max_id == 0:
+                break
+            # 适当延时防反爬
+            time.sleep(0.5)
+            
+        except Exception as e:
+            print(f"      ⚠️ 爬取楼中楼出错 (ID: {comment_id}): {e}")
+            break
+            
+    return replies
+
+def scrape_comments(page, post_id, target_user_id=""):
+    """
+    通过微博 AJAX 接口爬取一条微博的评论，并包含子评论（楼中楼）。
+    返回主评论列表，格式: [{"id": "...", "post_id": "...", "time": "...", "user_id": "...", "user_name": "...", "content": "...", "like_count": 0, "replies": [...]}]
+    """
+    if not post_id:
+        return []
+        
+    comments = []
+    max_id = 0
+    url_template = "https://weibo.com/ajax/statuses/buildComments?is_show_bulletin=2&id={post_id}&is_mix=0&count=20&uid=&fetch_level=0"
+    
+    print(f"  -> 开始爬取微博 {post_id} 的评论区...")
+    
+    headers = {
+        "Referer": f"https://weibo.com/detail/{post_id}",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+
+    while len(comments) < MAX_COMMENTS_PER_POST:
+        url = url_template.format(post_id=post_id)
+        if max_id > 0:
+            url += f"&max_id={max_id}"
+            
+        try:
+            # 使用 Playwright 的 context.request 发送带有当前登录状态 (Cookies) 的 GET 请求
+            response = page.context.request.get(url, headers=headers)
+            if response.status != 200:
+                print(f"    ⚠️ 获取评论接口返回状态码: {response.status}")
+                break
+                
+            res_json = response.json()
+            if not res_json or res_json.get("ok") != 1:
+                break
+                
+            data = res_json.get("data", [])
+            if not data:
+                break
+                
+            for item in data:
+                if len(comments) >= MAX_COMMENTS_PER_POST:
+                    break
+                
+                comment_id = str(item.get("id"))
+                comment_text_raw = item.get("text", "")
+                
+                # 去除 HTML 标签，如超链接或表情图片标签
+                comment_text = re.sub(r'<[^>]+>', '', comment_text_raw).strip()
+                
+                user_info = item.get("user", {})
+                user_id = str(user_info.get("id", ""))
+                user_name = user_info.get("screen_name", "未知用户")
+                
+                # 评论时间处理
+                created_at_str = item.get("created_at", "")
+                comment_time = ""
+                if created_at_str:
+                    try:
+                        # 微博的格式类似 "Mon Jun 01 15:00:00 +0800 2026"
+                        dt = datetime.strptime(created_at_str, "%a %b %d %H:%M:%S %z %Y")
+                        # 转换成无时区的本地时间字符串（方便统一处理）
+                        comment_time = dt.strftime("%Y-%m-%d %H:%M:%S")
+                    except Exception:
+                        comment_time = str(created_at_str)
+                
+                like_count = item.get("like_counts", 0)
+                
+                # 处理楼中楼回复
+                replies = []
+                raw_replies = item.get("comments", [])
+                total_replies_cnt = item.get("total_number", 0)
+                
+                if total_replies_cnt > len(raw_replies):
+                    # 如果子评论数量多于默认带回的数据，通过接口拉取完整数据
+                    replies = scrape_replies(page, post_id, comment_id, target_user_id)
+                else:
+                    # 否则，直接解析当前随附的子评论数据以节省请求
+                    for r_item in raw_replies:
+                        r_id = str(r_item.get("id"))
+                        r_text_raw = r_item.get("text", "")
+                        r_text = re.sub(r'<[^>]+>', '', r_text_raw).strip()
+                        
+                        r_user_info = r_item.get("user", {})
+                        r_user_id = str(r_user_info.get("id", ""))
+                        r_user_name = r_user_info.get("screen_name", "未知用户")
+                        
+                        r_created_at = r_item.get("created_at", "")
+                        r_time = ""
+                        if r_created_at:
+                            try:
+                                r_dt = datetime.strptime(r_created_at, "%a %b %d %H:%M:%S %z %Y")
+                                r_time = r_dt.strftime("%Y-%m-%d %H:%M:%S")
+                            except Exception:
+                                r_time = str(r_created_at)
+                        
+                        r_like_count = r_item.get("like_counts", 0)
+                        replies.append({
+                            "id": r_id,
+                            "post_id": post_id,
+                            "parent_id": comment_id,
+                            "time": r_time,
+                            "user_id": r_user_id,
+                            "user_name": r_user_name,
+                            "content": r_text,
+                            "like_count": r_like_count
+                        })
+                
+                comments.append({
+                    "id": comment_id,
+                    "post_id": post_id,
+                    "time": comment_time,
+                    "user_id": user_id,
+                    "user_name": user_name,
+                    "content": comment_text,
+                    "like_count": like_count,
+                    "replies": replies
+                })
+            
+            # 判断是否有下一页
+            max_id = res_json.get("max_id", 0)
+            if max_id == 0:
+                break
+                
+            # 适当延时防反爬
+            time.sleep(1.0)
+            
+        except Exception as e:
+            print(f"    ❌ 爬取评论出错: {e}")
+            break
+            
+    print(f"  -> 微博 {post_id} 成功爬取 {len(comments)} 条评论。")
+    return comments
 
 def fetch_user_name(page, user_id):
     """
@@ -837,6 +1057,14 @@ def scrape_weibo_search():
                                 except Exception as lp_err:
                                     print(f"提取实况照片视频失败 (ID: {post_id}): {lp_err}")
                             
+                            # 5.8 提取评论区
+                            comments = []
+                            if ENABLE_SCRAPE_COMMENTS and post_id:
+                                try:
+                                    comments = scrape_comments(page, post_id, user_id)
+                                except Exception as c_err:
+                                    print(f"爬取评论失败 (ID: {post_id}): {c_err}")
+
                             reposts_c, comments_c, attitudes_c = parse_weibo_stats(stats_text)
                             post_data = {
                                 "id": post_id,
@@ -850,7 +1078,8 @@ def scrape_weibo_search():
                                 "images": images,
                                 "videos": videos,
                                 "download_videos": download_videos,
-                                "livephotos": livephotos
+                                "livephotos": livephotos,
+                                "comments": comments
                             }
                             all_posts.append(post_data)
                             print(f"抓取: {post_time} - {content[:10]}...")
@@ -983,12 +1212,62 @@ def save_to_csv(data, user_name):
             df_combined = df_combined.sort_values(by="time", ascending=True)
             df_combined.to_csv(csv_path, index=False, encoding="utf-8-sig")
             print(f"✅ 已增量更新 CSV 数据文件: {csv_path}")
-            return
         except Exception as e:
             print(f"⚠️ 读取/合并旧 CSV 失败: {e}，将直接重写。")
-            
-    df_new.to_csv(csv_path, index=False, encoding="utf-8-sig")
-    print(f"✅ 已导出 CSV 数据文件: {csv_path}")
+            df_new.to_csv(csv_path, index=False, encoding="utf-8-sig")
+            print(f"✅ 已导出 CSV 数据文件: {csv_path}")
+    else:
+        df_new.to_csv(csv_path, index=False, encoding="utf-8-sig")
+        print(f"✅ 已导出 CSV 数据文件: {csv_path}")
+        
+    # 额外保存 comments.csv (包含主评论和楼中楼)
+    if ENABLE_SCRAPE_COMMENTS:
+        comments_data = []
+        for post in data:
+            if "comments" in post:
+                for c in post["comments"]:
+                    # 1. 添加主评论到列表
+                    comments_data.append({
+                        "id": str(c.get("id")),
+                        "post_id": str(c.get("post_id")),
+                        "parent_id": "", # 主评论 parent_id 为空
+                        "time": c.get("time"),
+                        "user_id": str(c.get("user_id")),
+                        "user_name": c.get("user_name"),
+                        "content": c.get("content"),
+                        "like_count": c.get("like_count", 0)
+                    })
+                    # 2. 如果有楼中楼子评论，扁平化添加
+                    if "replies" in c:
+                        for r in c["replies"]:
+                            comments_data.append({
+                                "id": str(r.get("id")),
+                                "post_id": str(r.get("post_id")),
+                                "parent_id": str(r.get("parent_id")),
+                                "time": r.get("time"),
+                                "user_id": str(r.get("user_id")),
+                                "user_name": r.get("user_name"),
+                                "content": r.get("content"),
+                                "like_count": r.get("like_count", 0)
+                            })
+        if comments_data:
+            comments_csv_path = os.path.join(csv_dir, "comments.csv")
+            df_comments_new = pd.DataFrame(comments_data)
+            if os.path.exists(comments_csv_path):
+                try:
+                    df_comments_old = pd.read_csv(comments_csv_path, dtype={"id": str, "post_id": str, "parent_id": str, "user_id": str})
+                    df_comments_old["id"] = df_comments_old["id"].astype(str)
+                    df_comments_combined = pd.concat([df_comments_new, df_comments_old]).drop_duplicates(subset=["id"], keep="first")
+                    df_comments_combined = df_comments_combined.sort_values(by="time", ascending=True)
+                    df_comments_combined.to_csv(comments_csv_path, index=False, encoding="utf-8-sig")
+                    print(f"✅ 已增量更新 Comments CSV 数据文件: {comments_csv_path}")
+                except Exception as e:
+                    print(f"⚠️ 读取/合并旧 Comments CSV 失败: {e}，将直接重写。")
+                    df_comments_new.to_csv(comments_csv_path, index=False, encoding="utf-8-sig")
+                    print(f"✅ 已导出 Comments CSV 数据文件: {comments_csv_path}")
+            else:
+                df_comments_new.to_csv(comments_csv_path, index=False, encoding="utf-8-sig")
+                print(f"✅ 已导出 Comments CSV 数据文件: {comments_csv_path}")
 
 
 def save_to_sqlite(data, user_name):
@@ -1023,6 +1302,28 @@ def save_to_sqlite(data, user_name):
     """)
     conn.commit()
     
+    if ENABLE_SCRAPE_COMMENTS:
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS comments (
+                id TEXT PRIMARY KEY,
+                post_id TEXT,
+                parent_id TEXT,
+                time TEXT,
+                user_id TEXT,
+                user_name TEXT,
+                content TEXT,
+                like_count INTEGER,
+                FOREIGN KEY (post_id) REFERENCES posts (id)
+            )
+        """)
+        conn.commit()
+        # 兼容旧版本的数据库，如果不存在 parent_id 字段则动态新增
+        try:
+            cursor.execute("ALTER TABLE comments ADD COLUMN parent_id TEXT")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass # 已经存在 parent_id 字段
+    
     for post in data:
         cursor.execute("""
             INSERT OR REPLACE INTO posts (id, time, link, content, reposts_count, comments_count, attitudes_count, images, videos, livephotos)
@@ -1040,9 +1341,104 @@ def save_to_sqlite(data, user_name):
             json.dumps(post.get("livephotos", []))
         ))
         
+        if ENABLE_SCRAPE_COMMENTS and "comments" in post:
+            for comment in post["comments"]:
+                # 1. 写入主评论
+                cursor.execute("""
+                    INSERT OR REPLACE INTO comments (id, post_id, parent_id, time, user_id, user_name, content, like_count)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    comment.get("id"),
+                    comment.get("post_id"),
+                    None,
+                    comment.get("time"),
+                    comment.get("user_id"),
+                    comment.get("user_name"),
+                    comment.get("content"),
+                    comment.get("like_count", 0)
+                ))
+                # 2. 写入子评论（楼中楼）
+                if "replies" in comment:
+                    for reply in comment["replies"]:
+                        cursor.execute("""
+                            INSERT OR REPLACE INTO comments (id, post_id, parent_id, time, user_id, user_name, content, like_count)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            reply.get("id"),
+                            reply.get("post_id"),
+                            reply.get("parent_id"),
+                            reply.get("time"),
+                            reply.get("user_id"),
+                            reply.get("user_name"),
+                            reply.get("content"),
+                            reply.get("like_count", 0)
+                        ))
+        
     conn.commit()
     conn.close()
     print(f"✅ 已同步 SQLite 数据库: {db_path}")
+
+
+def save_to_json(data, user_name):
+    """
+    将用户的抓取结果保存到 weibo/用户名/posts.json 文件中。
+    采用增量合并去重写入：若文件已存在，加载旧数据、以 id 为 key 合并、并按 time 升序排序。
+    """
+    if not data:
+        return
+    import json
+    
+    json_dir = os.path.join(OUTPUT_DIR, user_name)
+    os.makedirs(json_dir, exist_ok=True)
+    json_path = os.path.join(json_dir, "posts.json")
+    
+    new_json_data = []
+    for post in data:
+        post_time_str = post.get("time").strftime("%Y-%m-%d %H:%M:%S") if isinstance(post.get("time"), datetime) else str(post.get("time"))
+        
+        post_item = {
+            "id": str(post.get("id")),
+            "time": post_time_str,
+            "link": post.get("link"),
+            "content": post.get("content"),
+            "reposts_count": post.get("reposts_count", 0),
+            "comments_count": post.get("comments_count", 0),
+            "attitudes_count": post.get("attitudes_count", 0),
+            "images": post.get("images", []),
+            "videos": post.get("videos", []),
+            "livephotos": post.get("livephotos", []),
+        }
+        if "comments" in post:
+            post_item["comments"] = post["comments"]
+            
+        new_json_data.append(post_item)
+        
+    if os.path.exists(json_path):
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                old_json_data = json.load(f)
+            
+            combined_dict = {str(item["id"]): item for item in old_json_data}
+            for item in new_json_data:
+                combined_dict[str(item["id"])] = item
+                
+            merged_list = list(combined_dict.values())
+            merged_list.sort(key=lambda x: x.get("time", ""))
+            
+            with open(json_path, "w", encoding="utf-8") as f:
+                json.dump(merged_list, f, ensure_ascii=False, indent=2)
+            print(f"✅ 已增量更新 JSON 数据文件: {json_path}")
+            return
+        except Exception as e:
+            print(f"⚠️ 读取/合并旧 JSON 失败: {e}，将直接重写。")
+            
+    new_json_data.sort(key=lambda x: x.get("time", ""))
+    try:
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(new_json_data, f, ensure_ascii=False, indent=2)
+        print(f"✅ 已导出 JSON 数据文件: {json_path}")
+    except Exception as e:
+        print(f"❌ 保存 JSON 失败: {e}")
 
 
 def save_data(data, user_name, page=None):
@@ -1186,6 +1582,15 @@ def save_data(data, user_name, page=None):
                         body_lines.append(f'<video src="{local_path}" controls width="100%"></video>')
                     body_lines.append("")
 
+            if ENABLE_SCRAPE_COMMENTS and post.get("comments"):
+                body_lines.append("\n**评论区:**")
+                for c in post["comments"]:
+                    body_lines.append(f"- **{c['user_name']}** (赞 {c['like_count']}): {c['content']} *({c['time']})*")
+                    if c.get("replies"):
+                        for r in c["replies"]:
+                            body_lines.append(f"  - **{r['user_name']}** 回复 **{c['user_name']}** (赞 {r['like_count']}): {r['content']} *({r['time']})*")
+                body_lines.append("")
+
             if ENABLE_SAVE_MARKDOWN:
                 new_md_posts.append({
                     "id": post_id,
@@ -1235,7 +1640,7 @@ def save_data(data, user_name, page=None):
     user_dir = os.path.join(OUTPUT_DIR, user_name)
     print(f"当前已保存 {len(data)} 条数据到 {user_dir}")
     
-    # 额外存储为 CSV 和 SQLite 数据库
+    # 额外存储为 CSV、SQLite 数据库和 JSON
     if ENABLE_SAVE_CSV:
         try:
             save_to_csv(data, user_name)
@@ -1247,6 +1652,12 @@ def save_data(data, user_name, page=None):
             save_to_sqlite(data, user_name)
         except Exception as sqlite_err:
             print(f"保存 SQLite 失败: {sqlite_err}")
+
+    if ENABLE_SAVE_JSON:
+        try:
+            save_to_json(data, user_name)
+        except Exception as json_err:
+            print(f"保存 JSON 失败: {json_err}")
             
 
 if __name__ == "__main__":
