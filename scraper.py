@@ -75,10 +75,16 @@ def get_user_ids(config_val):
         
         # 解析剩余部分的字段
         for part in parts[1:]:
-            # 尝试解析为 ISO 格式时间: YYYY-MM-DDTHH:MM:SS
-            try:
-                start_time = datetime.strptime(part, "%Y-%m-%dT%H:%M:%S")
-            except ValueError:
+            parsed_dt = None
+            for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+                try:
+                    parsed_dt = datetime.strptime(part, fmt)
+                    break
+                except ValueError:
+                    continue
+            if parsed_dt is not None:
+                start_time = parsed_dt
+            else:
                 # 无法解析为时间，则作为用户备注名
                 username = part
                 
@@ -801,8 +807,12 @@ def scrape_weibo_search():
                 user_start_dt = user_info["start_time"] - timedelta(days=INCREMENTAL_LOOKBACK_DAYS)
                 user_start_date_str = user_start_dt.strftime("%Y-%m-%d")
             else:
-                user_start_dt = datetime.strptime(START_DATE, "%Y-%m-%d")
-                user_start_date_str = START_DATE
+                if START_DATE:
+                    user_start_dt = datetime.strptime(START_DATE, "%Y-%m-%d")
+                    user_start_date_str = START_DATE
+                else:
+                    user_start_dt = run_start_time
+                    user_start_date_str = run_start_time.strftime("%Y-%m-%d")
             
             if END_DATE:
                 user_end_dt = datetime.strptime(END_DATE, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
