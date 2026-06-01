@@ -1,0 +1,131 @@
+# Weibo Scraper
+
+A powerful Python-based Weibo data scraping and archiving tool. It uses Playwright to extract posts, handles date range filtering, supports original post filtering, downloads rich media assets (images, high-definition videos, Live Photos) in parallel, and exports structured results into Markdown diaries, CSV spreadsheets, and SQLite databases.
+
+It incorporates timezone corrections for late-night Weibo posts and runs an on-the-fly headless browser instance in the background to silently resolve high-definition video CDN links without interrupting your active workspace.
+
+---
+
+## 🚀 Features
+
+1. **Persisted Session Login**: One-time QR-code scanning to capture authentication cookies and persist state in `state.json`.
+2. **Batch & Incremental Crawling**: Feed a list of user IDs in `userid.txt`. The tool automatically checks for last-run timestamps, parses new posts incrementally, and updates/writes back timestamps and nicknames after every successful run.
+3. **Structured Data Exports**:
+   - **Markdown Archives**: Chronologically organized daily archives (`YYYY-MM-DD.md`) nested under monthly folders (`YYYY-MM/`). Post metrics are printed in a clean, human-readable format: `Engagement: reposts 12 | comments 34 | likes 56`.
+   - **CSV spreadsheets**: Columns storing Weibo ID, creation time, status link, full text content, engagement counts (`reposts_count`, `comments_count`, `attitudes_count`), and media file paths.
+   - **SQLite Databases**: Auto-generated local tables mapped with explicit data types, ideal for developers wishing to write custom queries or dashboards.
+4. **Silent Video & Live Photo Resolution**:
+   - Spawns a background headless browser instance to load video details pages and retrieve direct 1080p/2K/4K CDN stream URLs. 
+   - Downloads videos using multi-threaded chunked streams with dynamic speed metrics.
+   - Fetches Live Photo motion segments (`.mov` format) using async endpoint hooks.
+   - **Link Expiration Protection**: Saves official permanent webpage links (e.g. `video.weibo.com/show` or `weibo.com/tv/show`) in the SQLite and CSV outputs rather than expiring ephemeral CDN links (which return 403 after 2 hours).
+
+---
+
+## 🛠️ Installation
+
+### Prerequisites
+- Python 3.8+
+- Chromium Browser (managed automatically by Playwright)
+
+### Setup Steps
+Run the following commands in your project directory:
+```bash
+pip install -r requirements.txt
+playwright install chromium
+```
+
+---
+
+## 🔑 Quick Start
+
+### Step 1: Scan and Login
+Authenticate with Weibo by running:
+```bash
+python login.py
+```
+A visible browser window will open. **Scan the QR code to log in**. Once the browser logs in and redirects to the Weibo homepage, the script will automatically close the window and save your login credentials to `state.json`.
+
+### Step 2: Configure Settings in `config.py`
+All settings are centrally managed via [config.py](./config.py):
+
+```python
+# --- Target User Configuration ---
+TARGET_USER_IDS = "userid.txt"  # Can be a text file path, a single ID string, or a list of IDs
+
+# --- Date Settings ---
+START_DATE = "2025-09-09"       # Starting date (inclusive, YYYY-MM-DD)
+END_DATE = "2025-09-09"         # Ending date. If left blank, crawls incrementally up to the current run time.
+
+# --- Output Switches (1 = Enabled, 0 = Disabled) ---
+ENABLE_SAVE_IMAGES = 1          # Save images
+ENABLE_SAVE_VIDEOS = 1          # Save video streams
+ENABLE_SAVE_LIVEPHOTOS = 1      # Save Live Photo motion videos (.mov)
+ENABLE_SAVE_CSV = 1             # Save structured rows to posts.csv
+ENABLE_SAVE_SQLITE = 1          # Sync records to posts.db SQLite databases
+ENABLE_SAVE_MARKDOWN = 1        # Save Markdown daily archive files (date-grouped)
+
+# --- Filtering ---
+ONLY_ORIGINAL = 0               # 1 = original posts only, 0 = include reposts
+```
+
+### Step 3: Configure target users in `userid.txt`
+If `TARGET_USER_IDS = "userid.txt"`, write target accounts inside the file (one ID per line). Comments and timestamps are auto-filled by the scraper:
+```text
+# ID         Nickname(Auto-filled)   Last-scraped-timestamp(Auto-filled)
+# 7928198622 RD观测                  2026-06-01T13:41:00
+6634214154 宋雨琦_i-dle
+```
+- **Incremental Runs**: If a row has a timestamp, the crawler uses it as the starting window for that user, ensuring only newer posts are fetched.
+- **Auto-Maintenance**: After finishing a user's crawl, the script automatically parses the nickname, logs the end timestamp, and updates the row text.
+
+### Step 4: Run the Scraper
+```bash
+python scraper.py
+```
+
+---
+
+## 📂 Output Folder Structure
+
+Scraped files are organized neatly under the `weibo` directory:
+```text
+weibo-scraper/
+├── weibo/                                  # Main output folder
+│   └── User Nickname/ (e.g. 宋雨琦_i-dle)
+│       ├── posts.csv                       # Struct spreadsheet summarizing user's posts
+│       ├── posts.db                        # Local SQLite database
+│       └── YYYY-MM/ (Monthly subfolder, e.g. 2025-09)
+│           ├── YYYY-MM-DD.md               # Post diary (organized by day)
+│           ├── img/                        # High-resolution images
+│           ├── video/                      # Scraped MP4 video files
+│           └── livephoto/                  # Live Photo video files (.mov)
+```
+
+### 1. Markdown Archive Layout
+```markdown
+# 2025-09-09 Weibo Archive
+
+## 23:00:00
+
+**Link:** [https://weibo.com/6634214154/5209101333955234](https://weibo.com/6634214154/5209101333955234) | Weibo ID: `5209101333955234`
+
+**Engagement:** Reposts 61487 | Comments 34730 | Likes 306553
+
+🥰🎵我的新歌<Gone>MV上线啦
+You know I’ll always be with you, baby🩹❤️
+...
+<video src="./video/20250909_230000_5209101333955234_1.mp4" controls width="100%"></video>
+```
+
+### 2. Database columns (CSV & SQLite)
+- `id` (Text Primary Key): Weibo post unique mid.
+- `time` (Text): Timestamp of the post.
+- `link` (Text): Stable URL linking to the post.
+- `content` (Text): Full text content.
+- `reposts_count` (Integer): Total repost count.
+- `comments_count` (Integer): Total comment count.
+- `attitudes_count` (Integer): Total like count.
+- `images` (Text): Local image file paths or large image CDN urls (comma-separated).
+- `videos` (Text): Official permanent webpage URLs of videos (avoiding token timeouts).
+- `livephotos` (Text): Extracted Live Photo URLs (JSON string).
