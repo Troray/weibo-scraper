@@ -55,7 +55,7 @@ TARGET_USER_IDS = "userid.txt"  # Can be a text file path, a single ID string, o
 
 # --- Date Settings ---
 START_DATE = "2025-09-09"       # Starting date (inclusive, YYYY-MM-DD)
-END_DATE = "2025-09-09"         # Ending date. If left blank, crawls incrementally up to the current run time.
+END_DATE = ""         # Ending date. If left blank, crawls incrementally up to the current run time.
 
 # --- Output Switches (1 = Enabled, 0 = Disabled) ---
 ENABLE_SAVE_IMAGES = 1          # Save images
@@ -73,8 +73,7 @@ ONLY_ORIGINAL = 0               # 1 = original posts only, 0 = include reposts
 If `TARGET_USER_IDS = "userid.txt"`, write target accounts inside the file (one ID per line). Comments and timestamps are auto-filled by the scraper:
 ```text
 # ID         Nickname(Auto-filled)   Last-scraped-timestamp(Auto-filled)
-# 7928198622 RD观测                  2026-06-01T13:41:00
-6634214154 宋雨琦_i-dle
+6634214154
 ```
 - **Incremental Runs**: If a row has a timestamp, the crawler uses it as the starting window for that user, ensuring only newer posts are fetched.
 - **Auto-Maintenance**: After finishing a user's crawl, the script automatically parses the nickname, logs the end timestamp, and updates the row text.
