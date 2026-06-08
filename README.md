@@ -56,13 +56,19 @@ TARGET_USER_IDS = "userid.txt"  # 可配置为 txt 配置文件路径 (如 "user
 START_DATE = "2025-09-09"       # 抓取起始日期 (格式: YYYY-MM-DD)
 END_DATE = ""         # 抓取结束日期。如果为空，则表示增量采集直至当前运行时间
 
-# --- 多媒体及输出保存开关 (1 = 启用，0 = 禁用) ---
-ENABLE_SAVE_IMAGES = 1          # 保存图片
-ENABLE_SAVE_VIDEOS = 1          # 保存视频
-ENABLE_SAVE_LIVEPHOTOS = 1      # 保存实况照片 (Live Photo) 的动作视频
+# --- 媒体下载精细控制 (1 = 启用，0 = 禁用) ---
+ORIGINAL_PIC_DOWNLOAD = 1          # 是否保存原创微博图片
+RETWEET_PIC_DOWNLOAD = 1           # 是否保存转发微博图片
+ORIGINAL_VIDEO_DOWNLOAD = 1        # 是否保存原创微博视频
+RETWEET_VIDEO_DOWNLOAD = 0         # 是否保存转发微博视频
+ORIGINAL_LIVE_PHOTO_DOWNLOAD = 1   # 是否保存原创微博Live Photo
+RETWEET_LIVE_PHOTO_DOWNLOAD = 0    # 是否保存转发微博Live Photo
+
+# --- 存储格式及输出保存开关 (1 = 启用，0 = 禁用) ---
 ENABLE_SAVE_CSV = 1             # 导出 CSV 数据表 (posts.csv)
 ENABLE_SAVE_SQLITE = 1          # 同步写入 SQLite 数据库 (posts.db)
 ENABLE_SAVE_MARKDOWN = 1        # 保存 Markdown 日报文件 (按日期归档)
+ENABLE_SAVE_JSON = 1            # 保存 JSON 数据文件 (posts.json)
 
 # --- 过滤开关 ---
 ONLY_ORIGINAL = 0               # 1 = 仅采集原创微博，0 = 采集全部微博（包括转发）
@@ -95,11 +101,19 @@ weibo-scraper/
 │   └── 对应博主昵称/ (如: 宋雨琦_i-dle)
 │       ├── posts.csv                       # 用户全部微博结构化汇总数据表
 │       ├── posts.db                        # 本地 SQLite 数据库
+│       ├── posts.json                      # JSON 格式备份数据
+│       ├── 对应博主id.txt                  # 包含 21 个字段的博主详细个人资料
 │       └── YYYY-MM/ (月度归档，如: 2025-09)
-│           ├── YYYY-MM-DD.md               # 微博日记本 (按天归档)
-│           ├── img/                        # 微博高清大图目录
-│           ├── video/                      # 微博超高清视频文件
-│           └── livephoto/                  # 实况照片动作视频目录 (.mov)
+│           ├── YYYY-MM-DD.md               # 微博日记本 (按天归档，包含发布设备、发布位置以及附带地点的评论列表)
+│           ├── img/                        # 原创微博高清大图目录
+│           ├── video/                      # 原创微博超高清视频文件
+│           ├── livephoto/                  # 原创实况照片动作视频目录 (.mov)
+│           ├── comment/                    # 评论区中图片、动图目录
+│           └── retweet/                    # 转发微博的媒体资源存放目录
+│               ├── img/                    # 转发微博图片
+│               ├── video/                  # 转发微博视频
+│               └── livephoto/              # 转发微博实况照片
+│               └── comment/                # 转发微博评论媒体 (如果存在)
 ```
 
 ### 1. Markdown 归档排版样例
@@ -119,6 +133,7 @@ You know I’ll always be with you, baby🩹❤️
 ```
 
 ### 2. CSV / SQLite 字段结构
+#### 微博表 (posts)
 - `id` (文本主键): 微博 mid
 - `time` (文本): 微博发布时间
 - `link` (文本): 微博正文链接
@@ -129,6 +144,22 @@ You know I’ll always be with you, baby🩹❤️
 - `images` (文本): 采集到的本地图片路径，或大图 CDN URL (逗号分割)
 - `videos` (文本): 保存的官方永久视频播放页地址 (防盗链接防失效)
 - `livephotos` (文本): 采集到的实况照片视频 URL (JSON)
+- `device` (文本): 微博发布设备
+- `ip_location` (文本): 微博发布位置 (IP 属地)
+
+#### 评论表 (comments)
+- `id` (文本主键): 评论 id
+- `post_id` (文本): 微博 mid
+- `parent_id` (文本): 父评论 id (主评论为空)
+- `time` (文本): 评论时间
+- `user_id` (文本): 评论用户 id
+- `user_name` (文本): 评论用户昵称
+- `content` (文本): 评论内容
+- `like_count` (整数): 点赞数
+- `media_url` (文本): 评论附带的媒体链接
+- `post_time` (文本): 对应微博的时间
+- `post_summary` (文本): 对应微博的内容摘要
+- `source` (文本): 评论来源/地区 (如 "来自浙江")
 
 ---
 

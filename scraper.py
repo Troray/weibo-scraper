@@ -22,9 +22,19 @@ START_DATE = config.START_DATE
 END_DATE = config.END_DATE
 OUTPUT_DIR = config.OUTPUT_DIR
 STATE_FILE = config.STATE_FILE
-ENABLE_SAVE_IMAGES = config.ENABLE_SAVE_IMAGES
-ENABLE_SAVE_VIDEOS = config.ENABLE_SAVE_VIDEOS
-ENABLE_SAVE_LIVEPHOTOS = config.ENABLE_SAVE_LIVEPHOTOS
+
+# 原创/转发图片视频实况下载设置映射到底层参数
+ORIGINAL_PIC_DOWNLOAD = getattr(config, "ORIGINAL_PIC_DOWNLOAD", 1)
+RETWEET_PIC_DOWNLOAD = getattr(config, "RETWEET_PIC_DOWNLOAD", 1)
+ORIGINAL_VIDEO_DOWNLOAD = getattr(config, "ORIGINAL_VIDEO_DOWNLOAD", 1)
+RETWEET_VIDEO_DOWNLOAD = getattr(config, "RETWEET_VIDEO_DOWNLOAD", 0)
+ORIGINAL_LIVE_PHOTO_DOWNLOAD = getattr(config, "ORIGINAL_LIVE_PHOTO_DOWNLOAD", 1)
+RETWEET_LIVE_PHOTO_DOWNLOAD = getattr(config, "RETWEET_LIVE_PHOTO_DOWNLOAD", 0)
+
+ENABLE_SAVE_IMAGES = (ORIGINAL_PIC_DOWNLOAD or RETWEET_PIC_DOWNLOAD)
+ENABLE_SAVE_VIDEOS = (ORIGINAL_VIDEO_DOWNLOAD or RETWEET_VIDEO_DOWNLOAD)
+ENABLE_SAVE_LIVEPHOTOS = (ORIGINAL_LIVE_PHOTO_DOWNLOAD or RETWEET_LIVE_PHOTO_DOWNLOAD)
+
 ENABLE_SAVE_CSV = config.ENABLE_SAVE_CSV
 ENABLE_SAVE_SQLITE = config.ENABLE_SAVE_SQLITE
 ENABLE_SAVE_MARKDOWN = config.ENABLE_SAVE_MARKDOWN
@@ -35,7 +45,6 @@ MAX_REPLIES_PER_COMMENT = getattr(config, "MAX_REPLIES_PER_COMMENT", 50)
 DOWNLOAD_MIN_MULTIPART_SIZE_MB = getattr(config, "DOWNLOAD_MIN_MULTIPART_SIZE_MB", 15)
 DOWNLOAD_NUM_THREADS = getattr(config, "DOWNLOAD_NUM_THREADS", 5)
 ONLY_ORIGINAL = config.ONLY_ORIGINAL
-INCREMENTAL_LOOKBACK_DAYS = getattr(config, "INCREMENTAL_LOOKBACK_DAYS", 5)
 ENABLE_SAVE_COMMENT_MEDIA = getattr(config, "ENABLE_SAVE_COMMENT_MEDIA", 0)
 SAVE_DATA_BY_PERIOD = getattr(config, "SAVE_DATA_BY_PERIOD", "both")
 DOWNLOAD_NUM_CONCURRENT_MEDIA = getattr(config, "DOWNLOAD_NUM_CONCURRENT_MEDIA", 5)
@@ -192,8 +201,11 @@ def download_file(url, save_path, page=None, show_progress=True):
     import sys
     import time
     
+    referer = "https://weibo.com/"
+    if "video.weibo.com" in url or "show.weibo.com" in url or "weibo.com/tv" in url:
+        referer = "https://video.weibo.com/"
     headers = {
-        "Referer": "https://video.weibo.com/",
+        "Referer": referer,
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
     
@@ -558,7 +570,8 @@ def scrape_replies(page, post_id, comment_id, post_author_uid=""):
                     "user_name": user_name,
                     "content": reply_text,
                     "like_count": like_count,
-                    "media_url": media_url
+                    "media_url": media_url,
+                    "source": item.get("source", "")
                 })
                 
             max_id = res_json.get("max_id", 0)
@@ -679,7 +692,8 @@ def scrape_comments(page, post_id, target_user_id=""):
                             "user_name": r_user_name,
                             "content": r_text,
                             "like_count": r_like_count,
-                            "media_url": r_media_url
+                            "media_url": r_media_url,
+                            "source": r_item.get("source", "")
                         })
                 
                 media_url = extract_comment_media_url(item)
@@ -692,7 +706,8 @@ def scrape_comments(page, post_id, target_user_id=""):
                     "content": comment_text,
                     "like_count": like_count,
                     "media_url": media_url,
-                    "replies": replies
+                    "replies": replies,
+                    "source": item.get("source", "")
                 })
             
             # 判断是否有下一页
@@ -720,11 +735,23 @@ def fetch_user_name(page, user_id):
     print(f"\n正在获取用户昵称: {profile_url}")
     try:
         page.goto(profile_url)
-        page.wait_for_load_state("domcontentloaded", timeout=15000)
-        # 等待页面动态渲染完成
+        page.wait_for_load_state("domcontentloaded", timeout=20000)
+        # 给页面一定的加载和网络请求时间
         time.sleep(3)
         
-        # 优先从页面元素获取昵称 (class 名含哈希，使用前缀匹配)
+        # 优先通过 API 接口获取昵称
+        try:
+            info_url = f"https://weibo.com/ajax/profile/info?uid={user_id}"
+            info_res = page.evaluate("async (url) => { const r = await fetch(url); return await r.json(); }", info_url)
+            if info_res.get("ok") == 1:
+                screen_name = info_res.get("data", {}).get("user", {}).get("screen_name")
+                if screen_name:
+                    print(f"✅ 通过 API 获取到用户昵称: {screen_name}")
+                    return screen_name
+        except Exception as api_err:
+            print(f"⚠️ 通过 API 获取昵称失败: {api_err}，尝试解析网页元素...")
+
+        # 兜底从页面元素获取昵称 (class 名含哈希，使用前缀匹配)
         name_el = page.locator("div[class^='_name_']").first
         if name_el.is_visible():
             user_name = name_el.inner_text().strip()
@@ -744,6 +771,175 @@ def fetch_user_name(page, user_id):
     
     print(f"⚠️ 无法获取用户昵称，使用用户 ID 作为目录名: {user_id}")
     return user_id
+
+
+def scrape_and_save_user_profile(page, user_id, user_name):
+    """
+    获取用户的详细个人档案信息，并写入 weibo/用户名/用户id.txt 文件中。
+    """
+    user_dir = os.path.join(OUTPUT_DIR, user_name)
+    os.makedirs(user_dir, exist_ok=True)
+    file_path = os.path.join(user_dir, f"{user_id}.txt")
+    
+    print(f"正在获取用户 {user_name} ({user_id}) 的详细个人信息...")
+    
+    try:
+        # 访问用户主页以确保 Cookies 初始化和请求在上下文内进行
+        profile_url = f"https://weibo.com/u/{user_id}"
+        page.goto(profile_url)
+        page.wait_for_load_state("domcontentloaded", timeout=20000)
+        time.sleep(3) # 给页面一定的加载 and 网络请求时间
+        
+        # 1. 爬取基础资料 info
+        info_url = f"https://weibo.com/ajax/profile/info?uid={user_id}"
+        info_res = page.evaluate("async (url) => { const r = await fetch(url); return await r.json(); }", info_url)
+        user_info = info_res.get("data", {}).get("user", {}) if info_res.get("ok") == 1 else {}
+        
+        # 2. 爬取详细资料 detail
+        detail_url = f"https://weibo.com/ajax/profile/detail?uid={user_id}"
+        detail_res = page.evaluate("async (url) => { const r = await fetch(url); return await r.json(); }", detail_url)
+        detail_info = detail_res.get("data", {}) if detail_res.get("ok") == 1 else {}
+        
+        if not user_info and not detail_info:
+            print(f"⚠️ 无法通过 API 接口获取用户 {user_id} 的资料")
+            return False
+            
+        # 性别映射
+        gender_raw = user_info.get("gender", "")
+        gender_map = {"f": "女", "m": "男"}
+        gender_str = gender_map.get(gender_raw, gender_raw)
+        
+        # 教育经历解析
+        edu_str = ""
+        edu = detail_info.get("education")
+        if edu:
+            if isinstance(edu, dict):
+                school = edu.get("school", "")
+                time_val = edu.get("time", "")
+                edu_str = f"{school} ({time_val})" if time_val else school
+            elif isinstance(edu, list):
+                edu_parts = []
+                for item in edu:
+                    if isinstance(item, dict):
+                        school = item.get("school", "")
+                        time_val = item.get("time", "")
+                        edu_parts.append(f"{school} ({time_val})" if time_val else school)
+                    elif isinstance(item, str):
+                        edu_parts.append(item)
+                edu_str = "、".join(edu_parts)
+            elif isinstance(edu, str):
+                edu_str = edu
+                
+        # 工作经历解析
+        career_str = ""
+        career = detail_info.get("career")
+        if career:
+            if isinstance(career, dict):
+                company = career.get("company", "")
+                time_val = career.get("time", "")
+                career_str = f"{company} ({time_val})" if time_val else company
+            elif isinstance(career, list):
+                career_parts = []
+                for item in career:
+                    if isinstance(item, dict):
+                        company = item.get("company", "")
+                        time_val = item.get("time", "")
+                        career_parts.append(f"{company} ({time_val})" if time_val else company)
+                    elif isinstance(item, str):
+                        career_parts.append(item)
+                career_str = "、".join(career_parts)
+            elif isinstance(career, str):
+                career_str = career
+                
+        # 会员等级
+        mbrank_val = user_info.get("mbrank")
+        mbrank_str = str(mbrank_val) if mbrank_val is not None else "0"
+        
+        # 微博等级
+        urank_val = user_info.get("urank") or detail_info.get("urank")
+        urank_str = str(urank_val) if urank_val is not None else ""
+        
+        # 是否认证
+        verified = user_info.get("verified", False)
+        verified_str = "True" if verified else "False"
+        
+        # 认证类型和认证信息
+        verified_type_val = user_info.get("verified_type", -1)
+        if not verified:
+            verified_type_str = "未认证"
+        elif verified_type_val == 0:
+            verified_type_str = "个人认证"
+        elif verified_type_val in (1, 2, 3, 4, 5, 6, 7):
+            verified_type_str = "官方认证/机构认证"
+        else:
+            verified_type_str = "其他认证"
+            
+        verified_reason = user_info.get("verified_reason", "")
+        
+        # 简介
+        desc = user_info.get("description", "")
+        
+        # 阳光信用
+        sunshine = detail_info.get("sunshine_credit", {}).get("level", "")
+        
+        # 获取并清洗头像 URLs
+        avatar_clean = user_info.get('profile_image_url', '')
+        if '?' in avatar_clean:
+            avatar_clean = avatar_clean.split('?')[0]
+        avatar_hd_clean = user_info.get('avatar_hd', '')
+        if '?' in avatar_hd_clean:
+            avatar_hd_clean = avatar_hd_clean.split('?')[0]
+
+        # 写入内容拼装
+        profile_content = [
+            f"用户id：{user_id}",
+            f"昵称：{user_info.get('screen_name', user_name)}",
+            f"性别：{gender_str}",
+            f"生日：{detail_info.get('birthday', '')}",
+            f"所在地：{user_info.get('location', '')}",
+            f"学习经历：{edu_str}",
+            f"工作经历：{career_str}",
+            f"阳光信用：{sunshine}",
+            f"微博注册时间：{detail_info.get('created_at', '')}",
+            f"微博数：{user_info.get('statuses_count', '')}",
+            f"关注数：{user_info.get('friends_count', '')}",
+            f"粉丝数：{user_info.get('followers_count', '')}",
+            f"简介：{desc}",
+            f"主页地址：https://weibo.com/u/{user_id}",
+            f"头像url：{avatar_clean}",
+            f"高清头像url：{avatar_hd_clean}",
+            f"微博等级：{urank_str}",
+            f"会员等级：{mbrank_str}",
+            f"是否认证：{verified_str}",
+            f"认证类型：{verified_type_str}",
+            f"认证信息：{verified_reason}"
+        ]
+        
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(profile_content))
+            
+        print(f"✅ 成功保存用户 {user_name} 个人资料至 {file_path}")
+
+        # 下载头像文件到本地
+        if avatar_clean:
+            avatar_local_path = os.path.join(user_dir, "avatar.jpg")
+            try:
+                download_file(avatar_clean, avatar_local_path, show_progress=False)
+                print(f"✅ 成功下载头像到本地: {avatar_local_path}")
+            except Exception as e:
+                print(f"⚠️ 下载用户头像失败: {e}")
+        if avatar_hd_clean:
+            avatar_hd_local_path = os.path.join(user_dir, "avatar_hd.jpg")
+            try:
+                download_file(avatar_hd_clean, avatar_hd_local_path, show_progress=False)
+                print(f"✅ 成功下载高清头像到本地: {avatar_hd_local_path}")
+            except Exception as e:
+                print(f"⚠️ 下载用户高清头像失败: {e}")
+
+        return True
+    except Exception as e:
+        print(f"❌ 获取用户 {user_name} 个人资料失败: {e}")
+        return False
 
 def update_userid_file(file_path, user_id, username, timestamp_str):
     """
@@ -868,6 +1064,11 @@ def load_existing_post_ids(user_name):
 
 
 def scrape_weibo_search():
+    # 校验存储格式：Markdown、CSV、JSON、SQLite 必须最少启用一项
+    if not (ENABLE_SAVE_MARKDOWN or ENABLE_SAVE_CSV or ENABLE_SAVE_JSON or ENABLE_SAVE_SQLITE):
+        print("Error: Markdown, CSV, JSON, SQLite storage formats must have at least one enabled!")
+        sys.exit(1)
+
     if not os.path.exists(STATE_FILE):
         print(f"错误: 未找到 {STATE_FILE}。请先运行 login.py 进行登录。")
         return
@@ -892,6 +1093,9 @@ def scrape_weibo_search():
             # 自动获取用户昵称
             user_name = fetch_user_name(page, user_id)
             
+            # 获取用户详细资料并保存至 weibo/用户名/用户id.txt
+            scrape_and_save_user_profile(page, user_id, user_name)
+            
             # 加载已存在的微博 ID 进行增量去重判定
             scraped_ids = load_existing_post_ids(user_name)
             
@@ -900,8 +1104,8 @@ def scrape_weibo_search():
             
             # 计算该用户的抓取时间范围
             if user_info["start_time"] is not None:
-                # 增量抓取回溯窗口：向前推 INCREMENTAL_LOOKBACK_DAYS 天，防止因新浪微博搜索索引延迟漏掉微博
-                user_start_dt = user_info["start_time"] - timedelta(days=INCREMENTAL_LOOKBACK_DAYS)
+                # 增量抓取起点：直接使用上次成功抓取的时间，去除了 lookback 回溯机制
+                user_start_dt = user_info["start_time"]
                 user_start_date_str = user_start_dt.strftime("%Y-%m-%d")
             else:
                 if START_DATE:
@@ -965,12 +1169,12 @@ def scrape_weibo_search():
                     
                     for card in cards:
                         try:
+                            # 确定是否是转发微博
+                            is_retweet = card.locator("div.card-comment").is_visible()
+                            
                             # 7. 原创微博过滤
-                            if ONLY_ORIGINAL == 1:
-                                is_retweet = card.locator("div.card-comment").is_visible()
-                                if is_retweet:
-                                    # print("  -> 跳过转发微博")
-                                    continue
+                            if ONLY_ORIGINAL == 1 and is_retweet:
+                                continue
 
                             # 1. 解析时间
                             from_el = card.locator("p.from").first
@@ -1020,6 +1224,48 @@ def scrape_weibo_search():
                                 print(f"  -> 跳过: 时间解析失败 '{time_str}'")
                                 continue
                                 
+                            # 提取发布设备 (device) 和发布位置 (ip_location)
+                            device = ""
+                            ip_location = ""
+
+                            # 1. 尝试从新版 React 布局提取 (基于类名特征)
+                            ip_el = card.locator("div[class*='_ip_']").first
+                            if ip_el.is_visible():
+                                ip_text = ip_el.get_attribute("title") or ip_el.inner_text()
+                                if ip_text:
+                                    device_raw = ip_text.replace("发布于", "").strip()
+                                    if device_raw:
+                                        ip_location = device_raw
+
+                            source_el = card.locator("div[class*='_source_']").first
+                            if source_el.is_visible():
+                                source_text = source_el.get_attribute("title") or source_el.inner_text()
+                                if source_text:
+                                    device_raw = source_text.replace("来自", "").strip()
+                                    if device_raw:
+                                        device = device_raw
+
+                            # 2. 从传统 s.weibo.com 的 p.from 进行解析和兜底
+                            if from_el.is_visible():
+                                from_text = from_el.inner_text()
+                                
+                                # 提取位置
+                                if not ip_location:
+                                    ip_match = re.search(r"(?:发布于|IP属地[：:])\s*(\S+)", from_text)
+                                    if ip_match:
+                                        ip_location = ip_match.group(1).strip()
+                                
+                                # 提取设备
+                                if not device:
+                                    source_match = re.search(r"来自\s*(.+)$", from_text)
+                                    if source_match:
+                                        device_raw = source_match.group(1).strip()
+                                        if "发布于" in device_raw:
+                                            device_raw = device_raw.split("发布于")[0].strip()
+                                        elif "IP属地" in device_raw:
+                                            device_raw = device_raw.split("IP属地")[0].strip()
+                                        device = device_raw
+
                             # 2. 提取链接和ID
                             post_id = card.get_attribute("mid")
                             if post_id:
@@ -1056,7 +1302,7 @@ def scrape_weibo_search():
                             if user_info["start_time"] is not None:
                                 # 对于增量用户，如果该微博不在已抓取列表中，只要在回溯范围之内，我们都予以抓取以防漏掉
                                 if post_time < user_start_dt:
-                                    print(f"  -> 跳过早于回溯起点 ({user_start_dt}) 的微博: {post_time}")
+                                    print(f"  -> 跳过早于抓取起点 ({user_start_dt}) 的微博: {post_time}")
                                     continue
                                 if post_time > user_end_dt:
                                     print(f"  -> 跳过晚于本次抓取终点 ({user_end_dt}) 的微博: {post_time}")
@@ -1094,7 +1340,8 @@ def scrape_weibo_search():
                             
                             # 5.5 提取图片链接
                             images = []
-                            if ENABLE_SAVE_IMAGES:
+                            should_save_images = (RETWEET_PIC_DOWNLOAD if is_retweet else ORIGINAL_PIC_DOWNLOAD)
+                            if should_save_images:
                                 try:
                                     img_locators = card.locator("div.media-piclist img").all()
                                     for img_loc in img_locators:
@@ -1110,7 +1357,8 @@ def scrape_weibo_search():
                             # 5.6 提取视频链接
                             videos = []
                             download_videos = []
-                            if ENABLE_SAVE_VIDEOS:
+                            should_save_videos = (RETWEET_VIDEO_DOWNLOAD if is_retweet else ORIGINAL_VIDEO_DOWNLOAD)
+                            if should_save_videos:
                                 try:
                                     video_el = card.locator("a.WB_video_h5").first
                                     video_url = ""
@@ -1152,7 +1400,8 @@ def scrape_weibo_search():
 
                             # 5.7 提取 Live Photo 的视频链接
                             livephotos = []
-                            if ENABLE_SAVE_LIVEPHOTOS and images:
+                            should_save_livephotos = (RETWEET_LIVE_PHOTO_DOWNLOAD if is_retweet else ORIGINAL_LIVE_PHOTO_DOWNLOAD)
+                            if should_save_livephotos and images:
                                 try:
                                     api_url = f"https://weibo.com/ajax/statuses/show?id={post_id}"
                                     api_res = page.context.request.get(api_url)
@@ -1187,7 +1436,10 @@ def scrape_weibo_search():
                                 "videos": videos,
                                 "download_videos": download_videos,
                                 "livephotos": livephotos,
-                                "comments": comments
+                                "comments": comments,
+                                "device": device,
+                                "ip_location": ip_location,
+                                "is_retweet": is_retweet
                             }
                             all_posts.append(post_data)
                             print(f"抓取: {post_time} - {content[:10]}...")
@@ -1309,7 +1561,9 @@ def save_to_csv(data, user_name, target_dir=None, suffix=""):
             "attitudes_count": post.get("attitudes_count", 0),
             "images": ",".join(post.get("images", [])),
             "videos": ",".join(post.get("videos", [])),
-            "livephotos": ",".join(post.get("livephotos", []))
+            "livephotos": ",".join(post.get("livephotos", [])),
+            "device": post.get("device", ""),
+            "ip_location": post.get("ip_location", "")
         })
         
     df_new = pd.DataFrame(df_data)
@@ -1318,19 +1572,23 @@ def save_to_csv(data, user_name, target_dir=None, suffix=""):
         try:
             df_old = pd.read_csv(csv_path, dtype={"id": str})
             df_old["id"] = df_old["id"].astype(str)
+            # Ensure old columns exist
+            for col in ["device", "ip_location"]:
+                if col not in df_old.columns:
+                    df_old[col] = ""
             df_combined = pd.concat([df_new, df_old]).drop_duplicates(subset=["id"], keep="first")
             df_combined = df_combined.sort_values(by="time", ascending=True)
             df_combined.to_csv(csv_path, index=False, encoding="utf-8-sig")
-            print(f"✅ 已增量更新 CSV 数据文件: {csv_path}")
+            print("CSV updated.")
         except Exception as e:
-            print(f"⚠️ 读取/合并旧 CSV 失败: {e}，将直接重写。")
+            print(f"Error merging old CSV: {e}, rewriting.")
             df_new.to_csv(csv_path, index=False, encoding="utf-8-sig")
-            print(f"✅ 已导出 CSV 数据文件: {csv_path}")
+            print("CSV written.")
     else:
         df_new.to_csv(csv_path, index=False, encoding="utf-8-sig")
-        print(f"✅ 已导出 CSV 数据文件: {csv_path}")
+        print("CSV written.")
         
-    # 额外保存 comments.csv (包含主评论和楼中楼)
+    # Comments CSV
     if ENABLE_SCRAPE_COMMENTS:
         comments_data = []
         for post in data:
@@ -1341,11 +1599,10 @@ def save_to_csv(data, user_name, target_dir=None, suffix=""):
             
             if "comments" in post:
                 for c in post["comments"]:
-                    # 1. 添加主评论到列表
                     comments_data.append({
                         "id": str(c.get("id")),
                         "post_id": str(c.get("post_id")),
-                        "parent_id": "", # 主评论 parent_id 为空
+                        "parent_id": "",
                         "time": c.get("time"),
                         "user_id": str(c.get("user_id")),
                         "user_name": c.get("user_name"),
@@ -1353,9 +1610,9 @@ def save_to_csv(data, user_name, target_dir=None, suffix=""):
                         "like_count": c.get("like_count", 0),
                         "media_url": c.get("media_url", ""),
                         "post_time": post_time_str,
-                        "post_summary": post_summary
+                        "post_summary": post_summary,
+                        "source": c.get("source", "")
                     })
-                    # 2. 如果有楼中楼子评论，扁平化添加
                     if "replies" in c:
                         for r in c["replies"]:
                             comments_data.append({
@@ -1369,7 +1626,8 @@ def save_to_csv(data, user_name, target_dir=None, suffix=""):
                                 "like_count": r.get("like_count", 0),
                                 "media_url": r.get("media_url", ""),
                                 "post_time": post_time_str,
-                                "post_summary": post_summary
+                                "post_summary": post_summary,
+                                "source": r.get("source", "")
                             })
         if comments_data:
             comments_csv_name = f"comments_{suffix}.csv" if suffix else "comments.csv"
@@ -1379,17 +1637,19 @@ def save_to_csv(data, user_name, target_dir=None, suffix=""):
                 try:
                     df_comments_old = pd.read_csv(comments_csv_path, dtype={"id": str, "post_id": str, "parent_id": str, "user_id": str})
                     df_comments_old["id"] = df_comments_old["id"].astype(str)
+                    if "source" not in df_comments_old.columns:
+                        df_comments_old["source"] = ""
                     df_comments_combined = pd.concat([df_comments_new, df_comments_old]).drop_duplicates(subset=["id"], keep="first")
                     df_comments_combined = df_comments_combined.sort_values(by="time", ascending=True)
                     df_comments_combined.to_csv(comments_csv_path, index=False, encoding="utf-8-sig")
-                    print(f"✅ 已增量更新 Comments CSV 数据文件: {comments_csv_path}")
+                    print("Comments CSV updated.")
                 except Exception as e:
-                    print(f"⚠️ 读取/合并旧 Comments CSV 失败: {e}，将直接重写。")
+                    print(f"Error merging old comments CSV: {e}, rewriting.")
                     df_comments_new.to_csv(comments_csv_path, index=False, encoding="utf-8-sig")
-                    print(f"✅ 已导出 Comments CSV 数据文件: {comments_csv_path}")
+                    print("Comments CSV written.")
             else:
                 df_comments_new.to_csv(comments_csv_path, index=False, encoding="utf-8-sig")
-                print(f"✅ 已导出 Comments CSV 数据文件: {comments_csv_path}")
+                print("Comments CSV written.")
 
 
 def save_to_sqlite(data, user_name, target_dir=None, suffix=""):
@@ -1420,11 +1680,21 @@ def save_to_sqlite(data, user_name, target_dir=None, suffix=""):
             attitudes_count INTEGER,
             images TEXT,
             videos TEXT,
-            livephotos TEXT
+            livephotos TEXT,
+            device TEXT,
+            ip_location TEXT
         )
     """)
     conn.commit()
     
+    # 动态扩容以防止已有数据库报错
+    for col in ["device", "ip_location"]:
+        try:
+            cursor.execute(f"ALTER TABLE posts ADD COLUMN {col} TEXT")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
+            
     if ENABLE_SCRAPE_COMMENTS:
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS comments (
@@ -1439,12 +1709,13 @@ def save_to_sqlite(data, user_name, target_dir=None, suffix=""):
                 media_url TEXT,
                 post_time TEXT,
                 post_summary TEXT,
+                source TEXT,
                 FOREIGN KEY (post_id) REFERENCES posts (id)
             )
         """)
         conn.commit()
         # 兼容旧版本的数据库，如果不存在对应字段则动态新增
-        for col in ["parent_id", "media_url", "post_time", "post_summary"]:
+        for col in ["parent_id", "media_url", "post_time", "post_summary", "source"]:
             try:
                 cursor.execute(f"ALTER TABLE comments ADD COLUMN {col} TEXT")
                 conn.commit()
@@ -1458,8 +1729,8 @@ def save_to_sqlite(data, user_name, target_dir=None, suffix=""):
         post_summary = post_content[:20].replace("\n", " ").strip() + ("..." if len(post_content) > 20 else "")
 
         cursor.execute("""
-            INSERT OR REPLACE INTO posts (id, time, link, content, reposts_count, comments_count, attitudes_count, images, videos, livephotos)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO posts (id, time, link, content, reposts_count, comments_count, attitudes_count, images, videos, livephotos, device, ip_location)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             post.get("id"),
             post_time_str,
@@ -1470,15 +1741,16 @@ def save_to_sqlite(data, user_name, target_dir=None, suffix=""):
             post.get("attitudes_count", 0),
             json.dumps(post.get("images", [])),
             json.dumps(post.get("videos", [])),
-            json.dumps(post.get("livephotos", []))
+            json.dumps(post.get("livephotos", [])),
+            post.get("device", ""),
+            post.get("ip_location", "")
         ))
         
         if ENABLE_SCRAPE_COMMENTS and "comments" in post:
             for comment in post["comments"]:
-                # 1. 写入主评论
                 cursor.execute("""
-                    INSERT OR REPLACE INTO comments (id, post_id, parent_id, time, user_id, user_name, content, like_count, media_url, post_time, post_summary)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT OR REPLACE INTO comments (id, post_id, parent_id, time, user_id, user_name, content, like_count, media_url, post_time, post_summary, source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     comment.get("id"),
                     comment.get("post_id"),
@@ -1490,14 +1762,14 @@ def save_to_sqlite(data, user_name, target_dir=None, suffix=""):
                     comment.get("like_count", 0),
                     comment.get("media_url"),
                     post_time_str,
-                    post_summary
+                    post_summary,
+                    comment.get("source", "")
                 ))
-                # 2. 写入子评论（楼中楼）
                 if "replies" in comment:
                     for reply in comment["replies"]:
                         cursor.execute("""
-                            INSERT OR REPLACE INTO comments (id, post_id, parent_id, time, user_id, user_name, content, like_count, media_url, post_time, post_summary)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            INSERT OR REPLACE INTO comments (id, post_id, parent_id, time, user_id, user_name, content, like_count, media_url, post_time, post_summary, source)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """, (
                             reply.get("id"),
                             reply.get("post_id"),
@@ -1509,18 +1781,18 @@ def save_to_sqlite(data, user_name, target_dir=None, suffix=""):
                             reply.get("like_count", 0),
                             reply.get("media_url"),
                             post_time_str,
-                            post_summary
+                            post_summary,
+                            reply.get("source", "")
                         ))
         
     conn.commit()
     conn.close()
-    print(f"✅ 已同步 SQLite 数据库: {db_path}")
+    print(f"SQLite synced: {db_path}")
 
 
 def save_to_json(data, user_name, target_dir=None, suffix=""):
     """
     将用户的抓取结果保存到 JSON 文件中。
-    采用增量合并去重写入：若文件已存在，加载旧数据、以 id 为 key 合并、并按 time 升序排序。
     """
     if not data:
         return
@@ -1546,6 +1818,8 @@ def save_to_json(data, user_name, target_dir=None, suffix=""):
             "images": post.get("images", []),
             "videos": post.get("videos", []),
             "livephotos": post.get("livephotos", []),
+            "device": post.get("device", ""),
+            "ip_location": post.get("ip_location", "")
         }
         if "comments" in post:
             post_item["comments"] = post["comments"]
@@ -1566,18 +1840,18 @@ def save_to_json(data, user_name, target_dir=None, suffix=""):
             
             with open(json_path, "w", encoding="utf-8") as f:
                 json.dump(merged_list, f, ensure_ascii=False, indent=2)
-            print(f"✅ 已增量更新 JSON 数据文件: {json_path}")
+            print("JSON updated.")
             return
         except Exception as e:
-            print(f"⚠️ 读取/合并旧 JSON 失败: {e}，将直接重写。")
+            print(f"Error merging JSON: {e}, rewriting.")
             
     new_json_data.sort(key=lambda x: x.get("time", ""))
     try:
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(new_json_data, f, ensure_ascii=False, indent=2)
-        print(f"✅ 已导出 JSON 数据文件: {json_path}")
+        print("JSON written.")
     except Exception as e:
-        print(f"❌ 保存 JSON 失败: {e}")
+        print(f"Error saving JSON: {e}")
 
 
 def save_data(data, user_name, page=None):
@@ -1593,16 +1867,8 @@ def save_data(data, user_name, page=None):
         # 构建目录结构: OUTPUT_DIR/用户名/YYYY-MM/
         month_str = date_str[:7]  # "YYYY-MM"
         month_dir = os.path.join(OUTPUT_DIR, user_name, month_str)
-        img_dir = os.path.join(month_dir, "img")
-        video_dir = os.path.join(month_dir, "video")
-        livephoto_dir = os.path.join(month_dir, "livephoto")
-        comment_media_dir = os.path.join(month_dir, "comment_media")
         
         os.makedirs(month_dir, exist_ok=True)
-        if ENABLE_SAVE_IMAGES:
-            os.makedirs(img_dir, exist_ok=True)
-        if ENABLE_SAVE_COMMENT_MEDIA:
-            os.makedirs(comment_media_dir, exist_ok=True)
         
         file_name = f"{date_str}.md"
         file_path = os.path.join(month_dir, file_name)
@@ -1614,6 +1880,28 @@ def save_data(data, user_name, page=None):
             post_id = post.get("id", str(post['time']))
             safe_post_id = re.sub(r'[^\w\-]', '_', post_id)
             time_prefix = post['time'].strftime('%Y%m%d_%H%M%S')
+            
+            is_retweet = post.get("is_retweet", False)
+            if is_retweet:
+                img_dir = os.path.join(month_dir, "retweet", "img")
+                video_dir = os.path.join(month_dir, "retweet", "video")
+                livephoto_dir = os.path.join(month_dir, "retweet", "livephoto")
+                comment_media_dir = os.path.join(month_dir, "retweet", "comment")
+                
+                img_rel = "./retweet/img"
+                video_rel = "./retweet/video"
+                livephoto_rel = "./retweet/livephoto"
+                comment_rel = "./retweet/comment"
+            else:
+                img_dir = os.path.join(month_dir, "img")
+                video_dir = os.path.join(month_dir, "video")
+                livephoto_dir = os.path.join(month_dir, "livephoto")
+                comment_media_dir = os.path.join(month_dir, "comment")
+                
+                img_rel = "./img"
+                video_rel = "./video"
+                livephoto_rel = "./livephoto"
+                comment_rel = "./comment"
             
             body_lines = []
             # 写入微博链接与ID
@@ -1631,10 +1919,18 @@ def save_data(data, user_name, page=None):
             comments = post.get("comments_count", 0)
             likes = post.get("attitudes_count", 0)
             body_lines.append(f"**互动数据:** 转发 {reposts} | 评论 {comments} | 点赞 {likes}\n")
+            
+            # 基本信息 (发布设备和发布位置)
+            device_val = post.get("device", "")
+            location_val = post.get("ip_location", "")
+            if device_val or location_val:
+                body_lines.append(f"**基本信息:** 发布设备: `{device_val}` | 发布位置: `{location_val}`\n")
+            
             body_lines.append(f"{post['content']}\n")
             
             # 保存图片逻辑
             if ENABLE_SAVE_IMAGES and post.get("images"):
+                os.makedirs(img_dir, exist_ok=True)
                 local_image_paths = [None] * len(post["images"])
                 tasks = []
                 for idx, img_url in enumerate(post["images"]):
@@ -1645,7 +1941,7 @@ def save_data(data, user_name, page=None):
                     
                     img_name = f"{time_prefix}_{safe_post_id}_{idx + 1}.{ext}"
                     img_save_path = os.path.join(img_dir, img_name)
-                    local_path = f"./img/{img_name}"
+                    local_path = f"{img_rel}/{img_name}"
                     
                     if not os.path.exists(img_save_path):
                         tasks.append({
@@ -1679,7 +1975,7 @@ def save_data(data, user_name, page=None):
                 if local_image_paths:
                     body_lines.append("")
                     for local_path in local_image_paths:
-                        body_lines.append(f"![微博图片]({local_path})")
+                        body_lines.append(f"![image]({local_path})")
                     body_lines.append("")
                         
             # 保存视频逻辑
@@ -1689,7 +1985,6 @@ def save_data(data, user_name, page=None):
                 local_video_paths = [None] * len(video_urls_to_download)
                 tasks = []
                 for idx, video_url in enumerate(video_urls_to_download):
-                    # 如果是网页链接，我们直接跳过下载 (它们是保存在 CSV/SQLite 中的稳定地址)
                     if "video.weibo.com" in video_url or "weibo.com/tv" in video_url:
                         continue
                     ext = "mp4"
@@ -1699,7 +1994,7 @@ def save_data(data, user_name, page=None):
                     
                     video_name = f"{time_prefix}_{safe_post_id}_{idx + 1}.{ext}"
                     video_save_path = os.path.join(video_dir, video_name)
-                    local_path = f"./video/{video_name}"
+                    local_path = f"{video_rel}/{video_name}"
                     
                     if not os.path.exists(video_save_path):
                         tasks.append({
@@ -1749,7 +2044,7 @@ def save_data(data, user_name, page=None):
                     
                     lp_name = f"{time_prefix}_{safe_post_id}_{idx + 1}.{ext}"
                     lp_save_path = os.path.join(livephoto_dir, lp_name)
-                    local_path = f"./livephoto/{lp_name}"
+                    local_path = f"{livephoto_rel}/{lp_name}"
                     
                     if not os.path.exists(lp_save_path):
                         tasks.append({
@@ -1796,13 +2091,14 @@ def save_data(data, user_name, page=None):
                     c_id = c['id']
                     c_media = c.get("media_url", "")
                     if ENABLE_SAVE_COMMENT_MEDIA and c_media:
+                        os.makedirs(comment_media_dir, exist_ok=True)
                         ext = "jpg"
                         ext_match = re.search(r'\.(\w+)(?:\?|$)', c_media)
                         if ext_match:
                             ext = ext_match.group(1)
                         c_media_name = f"{time_prefix}_{safe_post_id}_comment_{c_id}.{ext}"
                         c_media_path = os.path.join(comment_media_dir, c_media_name)
-                        local_path = f"./comment_media/{c_media_name}"
+                        local_path = f"{comment_rel}/{c_media_name}"
                         
                         if not os.path.exists(c_media_path):
                             comment_tasks.append({
@@ -1820,13 +2116,14 @@ def save_data(data, user_name, page=None):
                             r_id = r['id']
                             r_media = r.get("media_url", "")
                             if ENABLE_SAVE_COMMENT_MEDIA and r_media:
+                                os.makedirs(comment_media_dir, exist_ok=True)
                                 ext = "jpg"
                                 ext_match = re.search(r'\.(\w+)(?:\?|$)', r_media)
                                 if ext_match:
                                     ext = ext_match.group(1)
                                 r_media_name = f"{time_prefix}_{safe_post_id}_comment_{r_id}.{ext}"
                                 r_media_path = os.path.join(comment_media_dir, r_media_name)
-                                local_path = f"./comment_media/{r_media_name}"
+                                local_path = f"{comment_rel}/{r_media_name}"
                                 
                                 if not os.path.exists(r_media_path):
                                     comment_tasks.append({
@@ -1866,10 +2163,13 @@ def save_data(data, user_name, page=None):
                     
                     local_c_media = media_path_map.get(c_id, "")
                     
+                    c_source = c.get("source", "")
+                    source_suffix = f" {c_source}" if c_source else ""
+                    
                     # 调整 (赞 xx) 的位置到内容后、时间前
-                    body_lines.append(f"- **{c_user}**: {c_content}  (赞 {c_like}) *({c_time})*")
+                    body_lines.append(f"- **{c_user}**: {c_content}{source_suffix}  (赞 {c_like}) *({c_time})*")
                     if local_c_media:
-                        body_lines.append(f"  ![评论图片]({local_c_media})")
+                        body_lines.append(f"  ![comment_image]({local_c_media})")
                         
                     if c.get("replies"):
                         for r in c["replies"]:
@@ -1881,9 +2181,12 @@ def save_data(data, user_name, page=None):
                             
                             local_r_media = media_path_map.get(r_id, "")
                             
-                            body_lines.append(f"  - **{r_user}** 回复 **{c_user}**: {r_content}  (赞 {r_like}) *({r_time})*")
+                            r_source = r.get("source", "")
+                            r_source_suffix = f" {r_source}" if r_source else ""
+                            
+                            body_lines.append(f"  - **{r_user}** 回复 **{c_user}**: {r_content}{r_source_suffix}  (赞 {r_like}) *({r_time})*")
                             if local_r_media:
-                                body_lines.append(f"    ![评论图片]({local_r_media})")
+                                body_lines.append(f"    ![comment_image]({local_r_media})")
                 body_lines.append("")
 
             if ENABLE_SAVE_MARKDOWN:

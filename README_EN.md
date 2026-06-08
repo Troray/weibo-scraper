@@ -57,13 +57,19 @@ TARGET_USER_IDS = "userid.txt"  # Can be a text file path, a single ID string, o
 START_DATE = "2025-09-09"       # Starting date (inclusive, YYYY-MM-DD)
 END_DATE = ""         # Ending date. If left blank, crawls incrementally up to the current run time.
 
+# --- Fine-grained Media Download Control (1 = Enabled, 0 = Disabled) ---
+ORIGINAL_PIC_DOWNLOAD = 1          # Save images from original posts
+RETWEET_PIC_DOWNLOAD = 1           # Save images from retweet posts
+ORIGINAL_VIDEO_DOWNLOAD = 1        # Save videos from original posts
+RETWEET_VIDEO_DOWNLOAD = 0         # Save videos from retweet posts
+ORIGINAL_LIVE_PHOTO_DOWNLOAD = 1   # Save Live Photos from original posts
+RETWEET_LIVE_PHOTO_DOWNLOAD = 0    # Save Live Photos from retweet posts
+
 # --- Output Switches (1 = Enabled, 0 = Disabled) ---
-ENABLE_SAVE_IMAGES = 1          # Save images
-ENABLE_SAVE_VIDEOS = 1          # Save video streams
-ENABLE_SAVE_LIVEPHOTOS = 1      # Save Live Photo motion videos (.mov)
 ENABLE_SAVE_CSV = 1             # Save structured rows to posts.csv
 ENABLE_SAVE_SQLITE = 1          # Sync records to posts.db SQLite databases
 ENABLE_SAVE_MARKDOWN = 1        # Save Markdown daily archive files (date-grouped)
+ENABLE_SAVE_JSON = 1            # Save backup data to posts.json
 
 # --- Filtering ---
 ONLY_ORIGINAL = 0               # 1 = original posts only, 0 = include reposts
@@ -94,11 +100,19 @@ weibo-scraper/
 │   └── User Nickname/ (e.g. 宋雨琦_i-dle)
 │       ├── posts.csv                       # Struct spreadsheet summarizing user's posts
 │       ├── posts.db                        # Local SQLite database
+│       ├── posts.json                      # JSON backup records
+│       ├── user_id.txt                     # Detailed user profile containing 21 fields
 │       └── YYYY-MM/ (Monthly subfolder, e.g. 2025-09)
-│           ├── YYYY-MM-DD.md               # Post diary (organized by day)
-│           ├── img/                        # High-resolution images
-│           ├── video/                      # Scraped MP4 video files
-│           └── livephoto/                  # Live Photo video files (.mov)
+│           ├── YYYY-MM-DD.md               # Post diary (organized by day, including device, location, and comments with regions)
+│           ├── img/                        # Original high-resolution images
+│           ├── video/                      # Original MP4 video files
+│           ├── livephoto/                  # Original Live Photo video files (.mov)
+│           ├── comment/                    # Original comment images
+│           └── retweet/                    # Repost media subdirectory
+│               ├── img/                    # Repost images
+│               ├── video/                  # Repost videos
+│               └── livephoto/              # Repost Live Photos
+│               └── comment/                # Repost comment images (if any)
 ```
 
 ### 1. Markdown Archive Layout
@@ -118,6 +132,7 @@ You know I’ll always be with you, baby🩹❤️
 ```
 
 ### 2. Database columns (CSV & SQLite)
+#### Posts Table (`posts`)
 - `id` (Text Primary Key): Weibo post unique mid.
 - `time` (Text): Timestamp of the post.
 - `link` (Text): Stable URL linking to the post.
@@ -128,6 +143,22 @@ You know I’ll always be with you, baby🩹❤️
 - `images` (Text): Local image file paths or large image CDN urls (comma-separated).
 - `videos` (Text): Official permanent webpage URLs of videos (avoiding token timeouts).
 - `livephotos` (Text): Extracted Live Photo URLs (JSON string).
+- `device` (Text): Publishing device.
+- `ip_location` (Text): Publishing location (IP location).
+
+#### Comments Table (`comments`)
+- `id` (Text Primary Key): Comment unique ID.
+- `post_id` (Text): Weibo post unique mid.
+- `parent_id` (Text): Parent comment ID (empty for root comments).
+- `time` (Text): Timestamp of the comment.
+- `user_id` (Text): Comment user ID.
+- `user_name` (Text): Comment user nickname.
+- `content` (Text): Comment body text.
+- `like_count` (Integer): Comment like count.
+- `media_url` (Text): Comment media asset URL.
+- `post_time` (Text): Timestamp of the parent post.
+- `post_summary` (Text): Text summary of the parent post.
+- `source` (Text): Region location of the commenter (e.g. "来自浙江").
 
 ---
 
