@@ -101,7 +101,7 @@ weibo-scraper/
 │       ├── posts.csv                       # Struct spreadsheet summarizing user's posts
 │       ├── posts.db                        # Local SQLite database
 │       ├── posts.json                      # JSON backup records
-│       ├── user_id.txt                     # Detailed user profile containing 21 fields
+│       ├── user_id.txt                     # Includes Detailed User Information fields
 │       └── YYYY-MM/ (Monthly subfolder, e.g. 2025-09)
 │           ├── YYYY-MM-DD.md               # Post diary (organized by day, including device, location, and comments with regions)
 │           ├── img/                        # Original high-resolution images
