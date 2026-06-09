@@ -1,8 +1,6 @@
 # Weibo Scraper
 
-A powerful Python-based Weibo data scraping and archiving tool. It uses Playwright to extract posts, handles date range filtering, supports original post filtering, downloads rich media assets (images, high-definition videos, Live Photos) in parallel, and exports structured results into Markdown diaries, CSV spreadsheets, and SQLite databases.
-
-It incorporates timezone corrections for late-night Weibo posts and runs an on-the-fly headless browser instance in the background to silently resolve high-definition video CDN links without interrupting your active workspace.
+A powerful Python-based Weibo data scraping and archiving tool. It supports date range filtering, original post filtering, multi-threaded downloading of rich media assets (images, high-definition videos, Live Photos), and exporting structured results into Markdown documents, CSV spreadsheets, JSON data, and SQLite databases.
 
 ---
 
@@ -12,12 +10,12 @@ It incorporates timezone corrections for late-night Weibo posts and runs an on-t
 2. **Batch & Incremental Crawling**: Feed a list of user IDs in `userid.txt`. The tool automatically checks for last-run timestamps, parses new posts incrementally, and updates/writes back timestamps and nicknames after every successful run.
 3. **Structured Data Exports**:
    - **Markdown Archives**: Chronologically organized daily archives (`YYYY-MM-DD.md`) nested under monthly folders (`YYYY-MM/`). Post metrics are printed in a clean, human-readable format: `Engagement: reposts 12 | comments 34 | likes 56`.
-   - **CSV spreadsheets**: Columns storing Weibo ID, creation time, status link, full text content, engagement counts (`reposts_count`, `comments_count`, `attitudes_count`), and media file paths.
-   - **SQLite Databases**: Auto-generated local tables mapped with explicit data types, ideal for developers wishing to write custom queries or dashboards.
+   - **CSV Spreadsheets**: Columns storing Weibo ID, creation time, status link, full text content, engagement counts (`reposts_count`, `comments_count`, `attitudes_count`), and media file paths.
+   - **JSON Data**: Local JSON data files created synchronously for quick access and secondary development.
+   - **SQLite Databases**: Auto-generated local SQL database tables, ideal for developers wishing to write custom queries or dashboards.
 4. **Silent Video & Live Photo Resolution**:
-   - Spawns a background headless browser instance to load video details pages and retrieve direct 1080p/2K/4K CDN stream URLs. 
-   - Downloads videos using multi-threaded chunked streams with dynamic speed metrics.
-   - Fetches Live Photo motion segments (`.mov` format) using async endpoint hooks.
+   - Spawns a background headless browser instance to load video details pages and retrieve direct 1080p/2K/4K CDN stream URLs. Downloads videos using multi-threaded chunked streams with dynamic speed metrics.
+   - Automatically crawls the `.mov` format video of Live Photos and completes the download.
    - **Link Expiration Protection**: Saves official permanent webpage links (e.g. `video.weibo.com/show` or `weibo.com/tv/show`) in the SQLite and CSV outputs rather than expiring ephemeral CDN links (which return 403 after 2 hours).
 
 ---
