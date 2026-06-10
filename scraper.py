@@ -730,11 +730,31 @@ def scrape_comments(page, post_id, target_user_id=""):
 
 def fetch_user_name(page, user_id):
     """
-    访问用户微博主页，自动获取用户昵称。
+    优先通过直接 API 接口请求获取用户昵称，若失败则访问用户微博主页自动获取。
     如果获取失败，回退使用用户 ID。
     """
+    info_url = f"https://weibo.com/ajax/profile/info?uid={user_id}"
+    headers = {
+        "Referer": f"https://weibo.com/u/{user_id}",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+
+    # 1. 尝试直接使用 HTTP API 快速获取昵称
+    try:
+        response = page.context.request.get(info_url, headers=headers)
+        if response.status == 200:
+            info_res = response.json()
+            if info_res.get("ok") == 1:
+                screen_name = info_res.get("data", {}).get("user", {}).get("screen_name")
+                if screen_name:
+                    print(f"✅ 获取到用户昵称: {screen_name}")
+                    return screen_name
+    except Exception as api_err:
+        print(f"⚠️ 获取用户昵称失败: {api_err}，将尝试页面加载兜底。")
+
+    # 2. 页面加载兜底流程
     profile_url = f"https://weibo.com/u/{user_id}"
-    print(f"\n正在获取用户昵称: {profile_url}")
+    print(f"\n正在通过页面获取用户昵称: {profile_url}")
     try:
         page.goto(profile_url)
         page.wait_for_load_state("domcontentloaded", timeout=20000)
@@ -743,7 +763,6 @@ def fetch_user_name(page, user_id):
         
         # 优先通过 API 接口获取昵称
         try:
-            info_url = f"https://weibo.com/ajax/profile/info?uid={user_id}"
             info_res = page.evaluate("async (url) => { const r = await fetch(url); return await r.json(); }", info_url)
             if info_res.get("ok") == 1:
                 screen_name = info_res.get("data", {}).get("user", {}).get("screen_name")
@@ -789,23 +808,55 @@ def scrape_and_save_user_profile(page, user_id, user_name):
         
     print(f"正在获取用户 {user_name} ({user_id}) 的详细个人信息...")
     
+    info_url = f"https://weibo.com/ajax/profile/info?uid={user_id}"
+    detail_url = f"https://weibo.com/ajax/profile/detail?uid={user_id}"
+    headers = {
+        "Referer": f"https://weibo.com/u/{user_id}",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+
+    user_info = {}
+    detail_info = {}
+    success = False
+
+    # 1. 尝试直接使用 HTTP API 快速获取用户资料
     try:
-        # 访问用户主页以确保 Cookies 初始化和请求在上下文内进行
-        profile_url = f"https://weibo.com/u/{user_id}"
-        page.goto(profile_url)
-        page.wait_for_load_state("domcontentloaded", timeout=20000)
-        time.sleep(3) # 给页面一定的加载 and 网络请求时间
+        info_res_obj = page.context.request.get(info_url, headers=headers)
+        detail_res_obj = page.context.request.get(detail_url, headers=headers)
         
-        # 1. 爬取基础资料 info
-        info_url = f"https://weibo.com/ajax/profile/info?uid={user_id}"
-        info_res = page.evaluate("async (url) => { const r = await fetch(url); return await r.json(); }", info_url)
-        user_info = info_res.get("data", {}).get("user", {}) if info_res.get("ok") == 1 else {}
-        
-        # 2. 爬取详细资料 detail
-        detail_url = f"https://weibo.com/ajax/profile/detail?uid={user_id}"
-        detail_res = page.evaluate("async (url) => { const r = await fetch(url); return await r.json(); }", detail_url)
-        detail_info = detail_res.get("data", {}) if detail_res.get("ok") == 1 else {}
-        
+        if info_res_obj.status == 200 and detail_res_obj.status == 200:
+            info_res = info_res_obj.json()
+            detail_res = detail_res_obj.json()
+            if info_res.get("ok") == 1 and detail_res.get("ok") == 1:
+                user_info = info_res.get("data", {}).get("user", {})
+                detail_info = detail_res.get("data", {})
+                if user_info or detail_info:
+                    print("✅ 获取到用户资料")
+                    success = True
+    except Exception as api_err:
+        print(f"⚠️ 获取用户资料失败: {api_err}，将尝试页面加载兜底。")
+
+    # 2. 页面加载兜底流程
+    if not success:
+        try:
+            # 访问用户主页以确保 Cookies 初始化和请求在上下文内进行
+            profile_url = f"https://weibo.com/u/{user_id}"
+            page.goto(profile_url)
+            page.wait_for_load_state("domcontentloaded", timeout=20000)
+            time.sleep(3) # 给页面一定的加载 and 网络请求时间
+            
+            # 爬取基础资料 info
+            info_res = page.evaluate("async (url) => { const r = await fetch(url); return await r.json(); }", info_url)
+            user_info = info_res.get("data", {}).get("user", {}) if info_res.get("ok") == 1 else {}
+            
+            # 爬取详细资料 detail
+            detail_res = page.evaluate("async (url) => { const r = await fetch(url); return await r.json(); }", detail_url)
+            detail_info = detail_res.get("data", {}) if detail_res.get("ok") == 1 else {}
+        except Exception as e:
+            print(f"❌ 页面加载获取用户 {user_name} 个人资料失败: {e}")
+            return False
+
+    try:
         if not user_info and not detail_info:
             print(f"⚠️ 无法通过 API 接口获取用户 {user_id} 的资料")
             return False
@@ -1597,8 +1648,9 @@ def scrape_weibo_search():
 
             # 该用户完全抓取成功后，更新对应文件的增量时间戳
             if TARGET_USER_IDS.endswith(".txt"):
-                run_start_time_str = run_start_time.strftime("%Y-%m-%dT%H:%M:%S")
-                update_userid_file(TARGET_USER_IDS, user_id, user_name, run_start_time_str)
+                crawl_end_time = datetime.now().replace(microsecond=0)
+                crawl_end_time_str = crawl_end_time.strftime("%Y-%m-%dT%H:%M:%S")
+                update_userid_file(TARGET_USER_IDS, user_id, user_name, crawl_end_time_str)
 
         try:
             headless_browser.close()
