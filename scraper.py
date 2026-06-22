@@ -50,6 +50,7 @@ SAVE_DATA_BY_PERIOD = getattr(config, "SAVE_DATA_BY_PERIOD", "both")
 DOWNLOAD_NUM_CONCURRENT_MEDIA = getattr(config, "DOWNLOAD_NUM_CONCURRENT_MEDIA", 5)
 COMMENT_PAGE_DELAY = getattr(config, "COMMENT_PAGE_DELAY", 0.3)
 REPLY_PAGE_DELAY = getattr(config, "REPLY_PAGE_DELAY", 0.15)
+COMMENT_FLOW = getattr(config, "COMMENT_FLOW", 0)
 # ----------------
 
 
@@ -511,6 +512,7 @@ def scrape_replies(page, post_id, comment_id, post_author_uid=""):
     """
     replies = []
     max_id = 0
+    max_id_type = 0
     url_template = "https://weibo.com/ajax/statuses/buildComments?is_reload=1&id={comment_id}&is_show_bulletin=2&is_mix=1&fetch_level=1&count=20&uid={uid}"
     
     headers = {
@@ -524,7 +526,7 @@ def scrape_replies(page, post_id, comment_id, post_author_uid=""):
     while len(replies) < max_replies_limit:
         url = url_template.format(comment_id=comment_id, uid=post_author_uid)
         if max_id > 0:
-            url += f"&max_id={max_id}"
+            url += f"&max_id={max_id}&max_id_type={max_id_type}"
             
         try:
             response = page.context.request.get(url, headers=headers)
@@ -577,6 +579,7 @@ def scrape_replies(page, post_id, comment_id, post_author_uid=""):
                 })
                 
             max_id = res_json.get("max_id", 0)
+            max_id_type = res_json.get("max_id_type", 0)
             if max_id == 0:
                 break
             # 适当延时防反爬
@@ -590,140 +593,170 @@ def scrape_replies(page, post_id, comment_id, post_author_uid=""):
 
 def scrape_comments(page, post_id, target_user_id=""):
     """
-    通过微博 AJAX 接口爬取一条微博的评论，并包含子评论（楼中楼）。
+    通过真实浏览器网络响应拦截爬取一条微博的评论，并包含子评论（楼中楼）。
+    这种方式可以完全模拟人工刷微博的行为，最大程度绕过隐式反爬获取完整评论。
     返回主评论列表，格式: [{"id": "...", "post_id": "...", "time": "...", "user_id": "...", "user_name": "...", "content": "...", "like_count": 0, "media_url": "...", "replies": [...]}]
     """
     if not post_id:
         return []
         
-    comments = []
-    max_id = 0
-    url_template = "https://weibo.com/ajax/statuses/buildComments?is_show_bulletin=2&id={post_id}&is_mix=0&count=20&uid=&fetch_level=0"
+    print(f"  -> 开始使用页面滚动拦截网络请求方式爬取微博 {post_id} 的评论区...")
     
-    print(f"  -> 开始爬取微博 {post_id} 的评论区...")
+    context = page.context
+    comment_page = context.new_page()
+    detail_url = f"https://weibo.com/detail/{post_id}"
+        
+    collected_json_data = []
     
-    headers = {
-        "Referer": f"https://weibo.com/detail/{post_id}",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
-
-    while len(comments) < MAX_COMMENTS_PER_POST:
-        url = url_template.format(post_id=post_id)
-        if max_id > 0:
-            url += f"&max_id={max_id}"
-            
+    def handle_response(response):
+        if "ajax/statuses/buildComments" in response.url and response.status == 200:
+            try:
+                res_json = response.json()
+                if res_json and res_json.get("ok") == 1:
+                    collected_json_data.append(res_json.get("data", []))
+            except Exception:
+                pass
+                
+    comment_page.on("response", handle_response)
+    
+    try:
+        comment_page.goto(detail_url)
         try:
-            # 使用 Playwright 的 context.request 发送带有当前登录状态 (Cookies) 的 GET 请求
-            response = page.context.request.get(url, headers=headers)
-            if response.status != 200:
-                print(f"    ⚠️ 获取评论接口返回状态码: {response.status}")
+            comment_page.wait_for_load_state("domcontentloaded", timeout=20000)
+        except Exception:
+            pass
+            
+        time.sleep(3)
+        
+        # 尝试切换为按时间排序，如果配置项启用了
+        if COMMENT_FLOW == 1:
+            try:
+                # 定位“按时间”按钮，通常是 div 或 span 里面写着“按时间”
+                time_sort_btn = comment_page.locator("text='按时间'").first
+                if time_sort_btn.is_visible(timeout=3000):
+                    time_sort_btn.click()
+                    time.sleep(2)
+                    print("    已自动切换为按时间排序。")
+            except Exception:
+                pass
+
+        last_json_count = 0
+        scroll_attempts = 0
+        max_scroll_attempts = 8 # 稍微减小最大尝试次数，以提高效率
+        
+        while True:
+            # 统计当前已抓取的主评论数，做粗略限制
+            current_comments_count = sum(len(d) for d in collected_json_data)
+            if current_comments_count >= MAX_COMMENTS_PER_POST:
+                print(f"    已拦截到充足的评论 ({current_comments_count})，达到配置上限。停止滚动。")
                 break
                 
-            res_json = response.json()
-            if not res_json or res_json.get("ok") != 1:
-                break
-                
-            data = res_json.get("data", [])
-            if not data:
-                break
-                
-            for item in data:
-                if len(comments) >= MAX_COMMENTS_PER_POST:
+            comment_page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            time.sleep(1.5)
+            
+            if len(collected_json_data) > last_json_count:
+                last_json_count = len(collected_json_data)
+                scroll_attempts = 0
+            else:
+                scroll_attempts += 1
+                if scroll_attempts >= max_scroll_attempts:
+                    print(f"    连续 {max_scroll_attempts} 次滚动未获取到新评论数据，判断评论区已到底部。")
                     break
-                
-                comment_id = str(item.get("id"))
-                comment_text_raw = item.get("text", "")
-                
-                # 去除 HTML 标签，如超链接或表情图片标签
-                comment_text = re.sub(r'<[^>]+>', '', comment_text_raw).strip()
-                
-                user_info = item.get("user", {})
-                user_id = str(user_info.get("id", ""))
-                user_name = user_info.get("screen_name", "未知用户")
-                
-                # 评论时间处理
-                created_at_str = item.get("created_at", "")
-                comment_time = ""
-                if created_at_str:
-                    try:
-                        # 微博的格式类似 "Mon Jun 01 15:00:00 +0800 2026"
-                        dt = datetime.strptime(created_at_str, "%a %b %d %H:%M:%S %z %Y")
-                        # 转换成无时区的本地时间字符串（方便统一处理）
-                        comment_time = dt.strftime("%Y-%m-%d %H:%M:%S")
-                    except Exception:
-                        comment_time = str(created_at_str)
-                
-                like_count = item.get("like_counts", 0)
-                
-                # 处理楼中楼回复
-                replies = []
-                raw_replies = item.get("comments", [])
-                total_replies_cnt = item.get("total_number", 0)
-                
-                if total_replies_cnt > len(raw_replies):
-                    # 如果子评论数量多于默认带回的数据，通过接口拉取完整数据
-                    replies = scrape_replies(page, post_id, comment_id, target_user_id)
-                else:
-                    # 否则，直接解析当前随附的子评论数据以节省请求
-                    for r_item in raw_replies:
-                        r_id = str(r_item.get("id"))
-                        r_text_raw = r_item.get("text", "")
-                        r_text = re.sub(r'<[^>]+>', '', r_text_raw).strip()
-                        
-                        r_user_info = r_item.get("user", {})
-                        r_user_id = str(r_user_info.get("id", ""))
-                        r_user_name = r_user_info.get("screen_name", "未知用户")
-                        
-                        r_created_at = r_item.get("created_at", "")
-                        r_time = ""
-                        if r_created_at:
-                            try:
-                                r_dt = datetime.strptime(r_created_at, "%a %b %d %H:%M:%S %z %Y")
-                                r_time = r_dt.strftime("%Y-%m-%d %H:%M:%S")
-                            except Exception:
-                                r_time = str(r_created_at)
-                        
-                        r_like_count = r_item.get("like_counts", 0)
-                        r_media_url = extract_comment_media_url(r_item)
-                        replies.append({
-                            "id": r_id,
-                            "post_id": post_id,
-                            "parent_id": comment_id,
-                            "time": r_time,
-                            "user_id": r_user_id,
-                            "user_name": r_user_name,
-                            "content": r_text,
-                            "like_count": r_like_count,
-                            "media_url": r_media_url,
-                            "source": r_item.get("source", "")
-                        })
-                
-                media_url = extract_comment_media_url(item)
-                comments.append({
-                    "id": comment_id,
-                    "post_id": post_id,
-                    "time": comment_time,
-                    "user_id": user_id,
-                    "user_name": user_name,
-                    "content": comment_text,
-                    "like_count": like_count,
-                    "media_url": media_url,
-                    "replies": replies,
-                    "source": item.get("source", "")
-                })
+    except Exception as e:
+        print(f"    ⚠️ 滚动拦截评论时页面出错: {e}")
+    finally:
+        try:
+            comment_page.close()
+        except Exception:
+            pass
             
-            # 判断是否有下一页
-            max_id = res_json.get("max_id", 0)
-            if max_id == 0:
+    # 去重并解析捕获到的 JSON 数据
+    comments_dict = {}
+    
+    for data in collected_json_data:
+        for item in data:
+            comment_id = str(item.get("id"))
+            if comment_id in comments_dict:
+                continue
+                
+            if len(comments_dict) >= MAX_COMMENTS_PER_POST:
                 break
                 
-            # 适当延时防反爬
-            time.sleep(COMMENT_PAGE_DELAY)
+            comment_text_raw = item.get("text", "")
+            comment_text = re.sub(r'<[^>]+>', '', comment_text_raw).strip()
             
-        except Exception as e:
-            print(f"    ❌ 爬取评论出错: {e}")
-            break
+            user_info = item.get("user", {})
+            user_id = str(user_info.get("id", ""))
+            user_name = user_info.get("screen_name", "未知用户")
             
+            created_at_str = item.get("created_at", "")
+            comment_time = ""
+            if created_at_str:
+                try:
+                    dt = datetime.strptime(created_at_str, "%a %b %d %H:%M:%S %z %Y")
+                    comment_time = dt.strftime("%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    comment_time = str(created_at_str)
+            
+            like_count = item.get("like_counts", 0)
+            
+            # 解析随附的楼中楼数据
+            replies = []
+            raw_replies = item.get("comments", [])
+            total_replies_cnt = item.get("total_number", 0)
+            
+            # 如果配置要求爬取更多楼中楼，且当前随附的楼中楼没给够，采用 API 原路补充拉取
+            if total_replies_cnt > len(raw_replies) and len(raw_replies) < MAX_REPLIES_PER_COMMENT:
+                replies = scrape_replies(page, post_id, comment_id, target_user_id)
+            else:
+                for r_item in raw_replies:
+                    r_id = str(r_item.get("id"))
+                    r_text_raw = r_item.get("text", "")
+                    r_text = re.sub(r'<[^>]+>', '', r_text_raw).strip()
+                    
+                    r_user_info = r_item.get("user", {})
+                    r_user_id = str(r_user_info.get("id", ""))
+                    r_user_name = r_user_info.get("screen_name", "未知用户")
+                    
+                    r_created_at = r_item.get("created_at", "")
+                    r_time = ""
+                    if r_created_at:
+                        try:
+                            r_dt = datetime.strptime(r_created_at, "%a %b %d %H:%M:%S %z %Y")
+                            r_time = r_dt.strftime("%Y-%m-%d %H:%M:%S")
+                        except Exception:
+                            r_time = str(r_created_at)
+                    
+                    r_like_count = r_item.get("like_counts", 0)
+                    r_media_url = extract_comment_media_url(r_item)
+                    replies.append({
+                        "id": r_id,
+                        "post_id": post_id,
+                        "parent_id": comment_id,
+                        "time": r_time,
+                        "user_id": r_user_id,
+                        "user_name": r_user_name,
+                        "content": r_text,
+                        "like_count": r_like_count,
+                        "media_url": r_media_url,
+                        "source": r_item.get("source", "")
+                    })
+            
+            media_url = extract_comment_media_url(item)
+            comments_dict[comment_id] = {
+                "id": comment_id,
+                "post_id": post_id,
+                "time": comment_time,
+                "user_id": user_id,
+                "user_name": user_name,
+                "content": comment_text,
+                "like_count": like_count,
+                "media_url": media_url,
+                "replies": replies,
+                "source": item.get("source", "")
+            }
+            
+    comments = list(comments_dict.values())
     total_count = len(comments) + sum(len(c.get("replies", [])) for c in comments)
     print(f"  -> 微博 {post_id} 成功爬取 {total_count} 条评论 (主评论 {len(comments)} 条，子回复 {total_count - len(comments)} 条)。")
     return comments
@@ -2731,7 +2764,198 @@ def save_data(data, user_name, page=None):
                     print(f"保存月度 JSON ({month_str}) 失败: {json_err}")
             
 
+def delete_local_post_data(post_id):
+    """
+    遍历本地存储目录，删除指定 post_id 对应的微博记录及相关评论
+    支持传入数字 ID 或 base62 bid，自动双向转换以保证删除彻底
+    """
+    import os
+    import json
+    import sqlite3
+    import pandas as pd
+    
+    post_id = str(post_id).strip()
+    target_id = post_id
+    target_bid = post_id
+    
+    ALPHABET = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
+    def base62_decode(s):
+        res = 0
+        for char in s:
+            res = res * 62 + ALPHABET.index(char)
+        return res
+    
+    try:
+        if post_id.isdigit():
+            # 输入是数字 mid，转换为 bid
+            mid = post_id
+            bid = ''
+            for i in range(len(mid) - 7, -7, -7):
+                offset = i if i > 0 else 0
+                length = 7 if i > 0 else len(mid) % 7
+                if length == 0 and offset == 0: length = 7
+                chunk = mid[offset:offset+length]
+                num = int(chunk)
+                b62 = ''
+                while num > 0:
+                    b62 = ALPHABET[num % 62] + b62
+                    num //= 62
+                if b62 == '': b62 = '0'
+                if offset > 0: bid = b62.zfill(4) + bid
+                else: bid = b62 + bid
+            target_bid = bid
+        else:
+            # 输入是字母数字 bid，转换为 mid
+            bid = post_id
+            mid = ''
+            for i in range(len(bid) - 4, -4, -4):
+                offset = i if i > 0 else 0
+                length = 4 if i > 0 else len(bid) % 4
+                if length == 0 and offset == 0: length = 4
+                chunk = bid[offset:offset+length]
+                num = base62_decode(chunk)
+                if offset > 0: mid = str(num).zfill(7) + mid
+                else: mid = str(num) + mid
+            target_id = mid
+    except Exception as e:
+        print(f"⚠️ ID 转换失败: {e}，将仅使用原输入进行精确匹配。")
+    
+    print(f"\n正在扫描并删除本地数据中 ID={target_id} (BID={target_bid}) 的所有记录...")
+    
+    base_dir = OUTPUT_DIR
+    if not os.path.exists(base_dir):
+        print(f"目录 {base_dir} 不存在。")
+        return
+        
+    deleted_count = {"csv": 0, "json": 0, "sqlite": 0, "md": 0}
+    
+    for root, dirs, files in os.walk(base_dir):
+        for file in files:
+            file_path = os.path.join(root, file)
+            
+            # 处理 JSON 文件
+            if file.endswith('.json'):
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    
+                    if isinstance(data, list):
+                        original_len = len(data)
+                        new_data = [item for item in data if str(item.get('id', '')) not in (target_id, target_bid) and str(item.get('bid', '')) not in (target_id, target_bid)]
+                        if len(new_data) < original_len:
+                            with open(file_path, 'w', encoding='utf-8') as f:
+                                json.dump(new_data, f, ensure_ascii=False, indent=2)
+                            deleted_count["json"] += (original_len - len(new_data))
+                            print(f"  [JSON] 已从 {file_path} 中删除 {(original_len - len(new_data))} 条记录")
+                except Exception as e:
+                    print(f"  读取/修改 JSON 出错: {file_path}, 错误: {e}")
+                    
+            # 处理 CSV 文件
+            elif file.endswith('.csv'):
+                try:
+                    df = pd.read_csv(file_path, dtype=str)
+                    original_len = len(df)
+                    
+                    # 宽松匹配，只要行内任何一列包含 target_id 或 target_bid，就干掉
+                    mask = df.apply(lambda row: row.astype(str).str.contains(target_id, regex=False).any() or row.astype(str).str.contains(target_bid, regex=False).any(), axis=1)
+                    
+                    new_df = df[~mask]
+                    if len(new_df) < original_len:
+                        new_df.to_csv(file_path, index=False, encoding='utf-8-sig')
+                        deleted_count["csv"] += (original_len - len(new_df))
+                        print(f"  [CSV] 已从 {file_path} 中删除 {(original_len - len(new_df))} 条记录")
+                except Exception as e:
+                    pass
+                    
+            # 处理 SQLite 文件
+            elif file.endswith('.db'):
+                try:
+                    conn = sqlite3.connect(file_path)
+                    cursor = conn.cursor()
+                    
+                    cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                    tables = [row[0] for row in cursor.fetchall()]
+                    
+                    if 'tweets' in tables:
+                        cursor.execute("PRAGMA table_info(tweets)")
+                        columns = [c[1] for c in cursor.fetchall()]
+                        if 'bid' in columns:
+                            cursor.execute("DELETE FROM tweets WHERE id=? OR id=? OR bid=? OR bid=?", (target_id, target_bid, target_id, target_bid))
+                        else:
+                            cursor.execute("DELETE FROM tweets WHERE id=? OR id=?", (target_id, target_bid))
+                        if cursor.rowcount > 0:
+                            deleted_count["sqlite"] += cursor.rowcount
+                            print(f"  [SQLite] 从 {file_path} 的 tweets 表中删除 {cursor.rowcount} 条记录")
+                            
+                    if 'comments' in tables:
+                        cursor.execute("DELETE FROM comments WHERE post_id=? OR post_id=?", (target_id, target_bid))
+                        if cursor.rowcount > 0:
+                            deleted_count["sqlite"] += cursor.rowcount
+                            print(f"  [SQLite] 从 {file_path} 的 comments 表中删除 {cursor.rowcount} 条记录")
+                            
+                    if 'replies' in tables:
+                        cursor.execute("DELETE FROM replies WHERE post_id=? OR post_id=?", (target_id, target_bid))
+                        if cursor.rowcount > 0:
+                            deleted_count["sqlite"] += cursor.rowcount
+                            print(f"  [SQLite] 从 {file_path} 的 replies 表中删除 {cursor.rowcount} 条记录")
+                            
+                    conn.commit()
+                    conn.close()
+                except Exception as e:
+                    print(f"  读取/修改 SQLite 出错: {file_path}, 错误: {e}")
+                    
+            # 处理 Markdown 文件
+            elif file.endswith('.md') or file.endswith('.txt'):
+                try:
+                    posts = parse_markdown_posts(file_path)
+                    original_len = len(posts)
+                    if original_len > 0:
+                        new_posts = []
+                        for p in posts:
+                            pid = str(p.get("id", ""))
+                            body_content = p.get("body", "")
+                            # 宽松匹配
+                            if target_id in pid or target_bid in pid or target_id in body_content or target_bid in body_content:
+                                pass
+                            else:
+                                new_posts.append(p)
+                                
+                        if len(new_posts) < original_len:
+                            with open(file_path, "r", encoding="utf-8") as f:
+                                first_line = f.readline()
+                                
+                            with open(file_path, "w", encoding="utf-8") as f:
+                                if first_line.startswith("# "):
+                                    f.write(first_line.strip() + "\n\n")
+                                else:
+                                    f.write("# 微博存档\n\n")
+                                    
+                                for p in new_posts:
+                                    f.write(f"## {p['time_str']}\n\n")
+                                    f.write(f"{p['body']}\n\n")
+                                    f.write(f"---\n\n")
+                            deleted_count["md"] += (original_len - len(new_posts))
+                            print(f"  [Markdown] 已从 {file_path} 中删除 {(original_len - len(new_posts))} 条记录")
+                except Exception:
+                    pass
+
+    print("\n--- 清理完成 ---")
+    print(f"共删除 JSON 记录: {deleted_count['json']} 条")
+    print(f"共删除 CSV 记录: {deleted_count['csv']} 条")
+    print(f"共删除 SQLite 记录: {deleted_count['sqlite']} 条")
+    print(f"共删除 Markdown 记录: {deleted_count['md']} 条")
+
+
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="微博爬虫及数据管理")
+    parser.add_argument("-d", "--delete", type=str, help="指定要删除的微博 post_id 或 bid", default="")
+    args, unknown = parser.parse_known_args()
+    
+    if args.delete:
+        delete_local_post_data(args.delete)
+        sys.exit(0)
+
     try:
         scrape_weibo_search()
     except KeyboardInterrupt:

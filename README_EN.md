@@ -87,6 +87,16 @@ If `TARGET_USER_IDS = "userid.txt"`, write target accounts inside the file (one 
 python scraper.py
 ```
 
+### Step 5 (Optional): Clean Up Local Data for a Specific Post
+If you find that a certain post's data is no longer needed after crawling, or if you need to clear it and re-crawl due to missing data in an early run, you can use a command-line argument to quickly and thoroughly clean up the local records of that post and all its comments:
+```bash
+# https://weibo.com/6634214154/R4gcQiHll
+python scraper.py -d R4gcQiHll
+# Or pass the pure numeric Weibo ID:
+python scraper.py -d 5310156124456519
+```
+A built-in conversion algorithm ensures that no matter which form of ID you provide, the program accurately scans and completely strips out the corresponding CSV, JSON, SQLite, and Markdown data.
+
 ---
 
 ## 📂 Output Folder Structure
