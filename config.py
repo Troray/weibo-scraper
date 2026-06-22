@@ -40,6 +40,7 @@ ENABLE_SCRAPE_COMMENTS = 0      # 是否爬取评论区 (1 = 启用，0 = 禁用
 MAX_COMMENTS_PER_POST = 1000     # 每条微博最多爬取评论数
 MAX_REPLIES_PER_COMMENT = 500     # 每条主评论最多爬取的子回复数 (楼中楼)
 ENABLE_SAVE_COMMENT_MEDIA = 0    # 是否保存评论区中的图片、动图媒体文件 (1 = 启用，0 = 禁用)
+COMMENT_FLOW = 1                # 评论爬取排序: 0 = 热门评论 (数量较少), 1 = 按时间排序 (数量更多，如需爬取全部评论建议设为 1)
 
 # --- 数据保存周期 ---
 # 可选值: 
