@@ -97,8 +97,11 @@ python scraper.py
 python scraper.py -d R4gcQiHll
 # 或者传入纯数字的微博 ID：
 python scraper.py -d 5310156124456519
+
+# 也可以根据日期批量彻底删除当天的所有记录：
+python scraper.py -d 2026-06-22
 ```
-内置了转换算法，无论你传入哪种形态的 ID，都能精准遍历并彻底剥离对应的 CSV、JSON、SQLite 和 Markdown 数据。
+内置了转换算法，无论你传入哪种形态的 ID 或者是 YYYY-MM-DD 格式的日期，都能精准遍历并彻底剥离对应的 CSV、JSON、SQLite 和 Markdown 数据。
 
 ---
 

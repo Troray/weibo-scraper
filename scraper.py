@@ -447,6 +447,15 @@ def extract_high_quality_video(detail_url, headless_browser):
             pass
         
     return best_url
+def clean_html_preserve_emojis(html_str):
+    if not html_str:
+        return ""
+    import re
+    import html
+    # 提取 <img alt="[xxx]"> 中的 [xxx] 作为表情纯文本
+    text = re.sub(r'<img[^>]*?alt=["\'](\[[^"\'\]]+\])["\'][^>]*?>', r'\1', html_str)
+    text = re.sub(r'<[^>]+>', '', text)
+    return html.unescape(text).strip()
 
 def extract_comment_media_url(item):
     """
@@ -547,7 +556,7 @@ def scrape_replies(page, post_id, comment_id, post_author_uid=""):
                     
                 reply_id = str(item.get("id"))
                 reply_text_raw = item.get("text", "")
-                reply_text = re.sub(r'<[^>]+>', '', reply_text_raw).strip()
+                reply_text = clean_html_preserve_emojis(reply_text_raw)
                 
                 user_info = item.get("user", {})
                 user_id = str(user_info.get("id", ""))
@@ -683,7 +692,7 @@ def scrape_comments(page, post_id, target_user_id=""):
                 break
                 
             comment_text_raw = item.get("text", "")
-            comment_text = re.sub(r'<[^>]+>', '', comment_text_raw).strip()
+            comment_text = clean_html_preserve_emojis(comment_text_raw)
             
             user_info = item.get("user", {})
             user_id = str(user_info.get("id", ""))
@@ -712,7 +721,7 @@ def scrape_comments(page, post_id, target_user_id=""):
                 for r_item in raw_replies:
                     r_id = str(r_item.get("id"))
                     r_text_raw = r_item.get("text", "")
-                    r_text = re.sub(r'<[^>]+>', '', r_text_raw).strip()
+                    r_text = clean_html_preserve_emojis(r_text_raw)
                     
                     r_user_info = r_item.get("user", {})
                     r_user_id = str(r_user_info.get("id", ""))
@@ -1420,10 +1429,24 @@ def scrape_weibo_search():
                             content_full = card.locator("xpath=.//p[@node-type='feed_list_content_full' and not(ancestor::div[contains(@class, 'card-comment')])]").first
                             content_normal = card.locator("xpath=.//p[contains(@class, 'txt') and not(ancestor::div[contains(@class, 'card-comment')])]").first
                             
+                            # JS 脚本，将所有带 alt 属性的图片（特别是表情）替换为其 alt 文本，防止表情丢失
+                            js_preserve_emojis = """el => {
+                                const clone = el.cloneNode(true);
+                                clone.querySelectorAll('img[alt]').forEach(img => {
+                                    if (img.alt && img.alt.startsWith('[') && img.alt.endsWith(']')) {
+                                        img.replaceWith(document.createTextNode(img.alt));
+                                    }
+                                });
+                                return clone.innerText;
+                            }"""
+                            
                             if content_full.is_visible():
-                                content = content_full.inner_text()
+                                content = content_full.evaluate(js_preserve_emojis).strip()
                             else:
-                                content = content_normal.inner_text()
+                                content = content_normal.evaluate(js_preserve_emojis).strip()
+                                
+                            # 清理微博正文末尾多余的“收起d”、“展开c”等字符
+                            content = re.sub(r'\s*(收起|展开)[a-zA-Z]$', '', content)
                                 
                             # 5. 提取互动数据
                             footer = card.locator("div.card-act").first
@@ -1465,20 +1488,23 @@ def scrape_weibo_search():
                                     retweet_content_full = retweet_box.locator("p[node-type='feed_list_content_full']").first
                                     retweet_content_normal = retweet_box.locator("p.txt").first
                                     if retweet_content_full.is_visible():
-                                        retweet_content = retweet_content_full.inner_text().strip()
+                                        retweet_content = retweet_content_full.evaluate(js_preserve_emojis).strip()
                                     elif retweet_content_normal.is_visible():
-                                        retweet_content = retweet_content_normal.inner_text().strip()
+                                        retweet_content = retweet_content_normal.evaluate(js_preserve_emojis).strip()
                                     else:
                                         all_txts = retweet_box.locator("p.txt").all()
                                         for txt_el in all_txts:
                                             if txt_el.is_visible():
-                                                retweet_content = txt_el.inner_text().strip()
+                                                retweet_content = txt_el.evaluate(js_preserve_emojis).strip()
                                                 break
                                     if not retweet_content:
                                         try:
-                                            retweet_content = retweet_box.locator("p.txt").first.inner_text().strip()
+                                            retweet_content = retweet_box.locator("p.txt").first.evaluate(js_preserve_emojis).strip()
                                         except:
                                             pass
+                                            
+                                    # 清理转发微博正文末尾多余的“收起d”、“展开c”等字符
+                                    retweet_content = re.sub(r'\s*(收起|展开)[a-zA-Z]$', '', retweet_content)
                                         
                                     retweet_from_el = retweet_box.locator(".from").first
                                     if retweet_from_el.is_visible():
@@ -2833,6 +2859,16 @@ def delete_local_post_data(post_id):
         for file in files:
             file_path = os.path.join(root, file)
             
+            # 快速预过滤，极大提升删除速度
+            if file.endswith(('.json', '.csv', '.md', '.txt')):
+                try:
+                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read()
+                    if target_id not in content and target_bid not in content:
+                        continue
+                except:
+                    pass
+            
             # 处理 JSON 文件
             if file.endswith('.json'):
                 try:
@@ -2857,7 +2893,10 @@ def delete_local_post_data(post_id):
                     original_len = len(df)
                     
                     # 宽松匹配，只要行内任何一列包含 target_id 或 target_bid，就干掉
-                    mask = df.apply(lambda row: row.astype(str).str.contains(target_id, regex=False).any() or row.astype(str).str.contains(target_bid, regex=False).any(), axis=1)
+                    mask = pd.Series([False] * len(df), index=df.index)
+                    for col in df.columns:
+                        col_str = df[col].astype(str)
+                        mask = mask | col_str.str.contains(target_id, regex=False) | col_str.str.contains(target_bid, regex=False)
                     
                     new_df = df[~mask]
                     if len(new_df) < original_len:
@@ -2945,15 +2984,233 @@ def delete_local_post_data(post_id):
     print(f"共删除 SQLite 记录: {deleted_count['sqlite']} 条")
     print(f"共删除 Markdown 记录: {deleted_count['md']} 条")
 
+def delete_local_data_by_date(target_date):
+    """
+    遍历本地存储目录，删除指定日期的微博记录及相关评论
+    target_date 格式应为 YYYY-MM-DD
+    """
+    import os
+    import json
+    import sqlite3
+    import pandas as pd
+    
+    print(f"\n正在扫描并收集本地数据中日期为 {target_date} 的相关 ID...")
+    
+    base_dir = OUTPUT_DIR
+    if not os.path.exists(base_dir):
+        print(f"目录 {base_dir} 不存在。")
+        return
+        
+    deleted_count = {"csv": 0, "json": 0, "sqlite": 0, "md": 0}
+    deleted_post_ids = set()
+    
+    # 第一遍：收集该日期的所有 post_id 和 bid
+    for root, dirs, files in os.walk(base_dir):
+        for file in files:
+            file_path = os.path.join(root, file)
+            
+            # 快速预过滤
+            if file.endswith(('.json', '.csv', '.md', '.txt')):
+                try:
+                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        if target_date not in f.read():
+                            continue
+                except:
+                    pass
+            
+            if file.endswith('.json'):
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    if isinstance(data, list):
+                        for item in data:
+                            if str(item.get('time', '')).startswith(target_date):
+                                if 'id' in item: deleted_post_ids.add(str(item['id']))
+                                if 'bid' in item: deleted_post_ids.add(str(item['bid']))
+                except: pass
+            elif file.endswith('.csv'):
+                try:
+                    df = pd.read_csv(file_path, dtype=str)
+                    if 'time' in df.columns:
+                        mask = df['time'].astype(str).str.startswith(target_date)
+                        for _, row in df[mask].iterrows():
+                            if 'id' in row and pd.notna(row['id']): deleted_post_ids.add(str(row['id']))
+                            if 'bid' in row and pd.notna(row['bid']): deleted_post_ids.add(str(row['bid']))
+                except: pass
+            elif file.endswith('.db'):
+                try:
+                    conn = sqlite3.connect(file_path)
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                    tables = [row[0] for row in cursor.fetchall()]
+                    if 'tweets' in tables:
+                        cursor.execute("SELECT id, bid FROM tweets WHERE time LIKE ?", (f"{target_date}%",))
+                        for row in cursor.fetchall():
+                            if row[0]: deleted_post_ids.add(str(row[0]))
+                            if len(row) > 1 and row[1]: deleted_post_ids.add(str(row[1]))
+                    conn.close()
+                except: pass
+
+    print(f"找到 {len(deleted_post_ids)} 个相关微博 ID，开始清理...")
+    
+    for root, dirs, files in os.walk(base_dir):
+        for file in files:
+            file_path = os.path.join(root, file)
+            
+            # 快速预过滤
+            if file.endswith(('.json', '.csv', '.md', '.txt')):
+                try:
+                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read()
+                        if target_date not in content and not any(d_id in content for d_id in deleted_post_ids):
+                            continue
+                except:
+                    pass
+            
+            # 处理 JSON 文件
+            if file.endswith('.json'):
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    
+                    if isinstance(data, list):
+                        original_len = len(data)
+                        new_data = []
+                        for item in data:
+                            is_match = False
+                            if str(item.get('time', '')).startswith(target_date):
+                                is_match = True
+                            elif str(item.get('id', '')) in deleted_post_ids or str(item.get('bid', '')) in deleted_post_ids:
+                                is_match = True
+                            elif str(item.get('post_id', '')) in deleted_post_ids:
+                                is_match = True
+                            
+                            if not is_match:
+                                new_data.append(item)
+                                
+                        if len(new_data) < original_len:
+                            with open(file_path, 'w', encoding='utf-8') as f:
+                                json.dump(new_data, f, ensure_ascii=False, indent=2)
+                            deleted_count["json"] += (original_len - len(new_data))
+                            print(f"  [JSON] 已从 {file_path} 中删除 {(original_len - len(new_data))} 条记录")
+                except Exception as e:
+                    print(f"  读取/修改 JSON 出错: {file_path}, 错误: {e}")
+                    
+            # 处理 CSV 文件
+            elif file.endswith('.csv'):
+                try:
+                    df = pd.read_csv(file_path, dtype=str)
+                    original_len = len(df)
+                    
+                    mask_time = pd.Series([False]*len(df), index=df.index)
+                    if 'time' in df.columns:
+                        mask_time = df['time'].astype(str).str.startswith(target_date)
+                        
+                    mask_id = pd.Series([False]*len(df), index=df.index)
+                    if 'id' in df.columns:
+                        mask_id = mask_id | df['id'].astype(str).isin(deleted_post_ids)
+                    if 'bid' in df.columns:
+                        mask_id = mask_id | df['bid'].astype(str).isin(deleted_post_ids)
+                    if 'post_id' in df.columns:
+                        mask_id = mask_id | df['post_id'].astype(str).isin(deleted_post_ids)
+                    
+                    mask = mask_time | mask_id
+                    new_df = df[~mask]
+                    if len(new_df) < original_len:
+                        new_df.to_csv(file_path, index=False, encoding='utf-8-sig')
+                        deleted_count["csv"] += (original_len - len(new_df))
+                        print(f"  [CSV] 已从 {file_path} 中删除 {(original_len - len(new_df))} 条记录")
+                except Exception as e:
+                    pass
+                    
+            # 处理 SQLite 文件
+            elif file.endswith('.db'):
+                try:
+                    conn = sqlite3.connect(file_path)
+                    cursor = conn.cursor()
+                    
+                    cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                    tables = [row[0] for row in cursor.fetchall()]
+                    
+                    ids_tuple = tuple(deleted_post_ids) if deleted_post_ids else ('',)
+                    placeholders = ','.join(['?'] * len(ids_tuple))
+                    
+                    if 'tweets' in tables:
+                        cursor.execute(f"DELETE FROM tweets WHERE time LIKE ? OR id IN ({placeholders}) OR bid IN ({placeholders})", (f"{target_date}%",) + ids_tuple + ids_tuple)
+                        if cursor.rowcount > 0:
+                            deleted_count["sqlite"] += cursor.rowcount
+                            print(f"  [SQLite] 从 {file_path} 的 tweets 表中删除 {cursor.rowcount} 条记录")
+                            
+                    if 'comments' in tables:
+                        cursor.execute(f"DELETE FROM comments WHERE time LIKE ? OR post_id IN ({placeholders})", (f"{target_date}%",) + ids_tuple)
+                        if cursor.rowcount > 0:
+                            deleted_count["sqlite"] += cursor.rowcount
+                            print(f"  [SQLite] 从 {file_path} 的 comments 表中删除 {cursor.rowcount} 条记录")
+                            
+                    if 'replies' in tables:
+                        cursor.execute(f"DELETE FROM replies WHERE time LIKE ? OR post_id IN ({placeholders})", (f"{target_date}%",) + ids_tuple)
+                        if cursor.rowcount > 0:
+                            deleted_count["sqlite"] += cursor.rowcount
+                            print(f"  [SQLite] 从 {file_path} 的 replies 表中删除 {cursor.rowcount} 条记录")
+                            
+                    conn.commit()
+                    conn.close()
+                except Exception as e:
+                    print(f"  读取/修改 SQLite 出错: {file_path}, 错误: {e}")
+                    
+            # 处理 Markdown 文件
+            elif file.endswith('.md') or file.endswith('.txt'):
+                try:
+                    posts = parse_markdown_posts(file_path)
+                    original_len = len(posts)
+                    if original_len > 0:
+                        new_posts = []
+                        for p in posts:
+                            pid = str(p.get("id", ""))
+                            time_str = p.get("time_str", "")
+                            if time_str.startswith(target_date) or any(d_id in pid for d_id in deleted_post_ids):
+                                pass
+                            else:
+                                new_posts.append(p)
+                                
+                        if len(new_posts) < original_len:
+                            with open(file_path, "r", encoding="utf-8") as f:
+                                first_line = f.readline()
+                                
+                            with open(file_path, "w", encoding="utf-8") as f:
+                                if first_line.startswith("# "):
+                                    f.write(first_line.strip() + "\n\n")
+                                else:
+                                    f.write("# 微博存档\n\n")
+                                    
+                                for p in new_posts:
+                                    f.write(f"## {p['time_str']}\n\n")
+                                    f.write(f"{p['body']}\n\n")
+                                    f.write(f"---\n\n")
+                            deleted_count["md"] += (original_len - len(new_posts))
+                            print(f"  [Markdown] 已从 {file_path} 中删除 {(original_len - len(new_posts))} 条记录")
+                except Exception:
+                    pass
+
+    print("\n--- 清理完成 ---")
+    print(f"共删除 JSON 记录: {deleted_count['json']} 条")
+    print(f"共删除 CSV 记录: {deleted_count['csv']} 条")
+    print(f"共删除 SQLite 记录: {deleted_count['sqlite']} 条")
+    print(f"共删除 Markdown 记录: {deleted_count['md']} 条")
+
+
 
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="微博爬虫及数据管理")
-    parser.add_argument("-d", "--delete", type=str, help="指定要删除的微博 post_id 或 bid", default="")
+    parser.add_argument("-d", "--delete", type=str, help="指定要删除的微博 post_id、bid 或日期 (YYYY-MM-DD)", default="")
     args, unknown = parser.parse_known_args()
     
     if args.delete:
-        delete_local_post_data(args.delete)
+        if re.match(r'^\d{4}-\d{2}-\d{2}$', args.delete):
+            delete_local_data_by_date(args.delete)
+        else:
+            delete_local_post_data(args.delete)
         sys.exit(0)
 
     try:
