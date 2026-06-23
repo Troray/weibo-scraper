@@ -94,8 +94,11 @@ If you find that a certain post's data is no longer needed after crawling, or if
 python scraper.py -d R4gcQiHll
 # Or pass the pure numeric Weibo ID:
 python scraper.py -d 5310156124456519
+
+# Or delete all records for a specific date in bulk:
+python scraper.py -d 2026-06-22
 ```
-A built-in conversion algorithm ensures that no matter which form of ID you provide, the program accurately scans and completely strips out the corresponding CSV, JSON, SQLite, and Markdown data.
+A built-in conversion algorithm ensures that no matter which form of ID or YYYY-MM-DD date you provide, the program accurately scans and completely strips out the corresponding CSV, JSON, SQLite, and Markdown data.
 
 ---
 
