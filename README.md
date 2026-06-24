@@ -90,6 +90,26 @@ python scraper.py
 ```
 爬虫运行后将展示实时抓取进度，并利用多线程并行下载高清视频等媒体资源，最后整理写入对应的磁盘目录。
 
+```bash
+# 1. 直接粘贴完整的微博链接（最推荐！天然自带 UID，无视本地配置，绝对优先级）
+python scraper.py -s https://weibo.com/6634214154/R4gcQiHll
+
+# 2. 只输入短 ID/BID 或 纯数字 MID 
+# （⚠️ 注意：此方式缺失博主信息，需确保 userid.txt 中只配了1个用户ID，或者通过 -u 参数明确指定）
+python scraper.py -s R4gcQiHll
+python scraper.py -s 5310156124456519
+python scraper.py -s R4gcQiHll -u 6634214154  # -u 参数可以明确指定用户ID，解决多用户ID问题
+
+# 3. 按日期重新抓取当天用户的记录 
+# （⚠️ 注意：此方式会遍历读取 userid.txt 中的所有用户ID。必须使用完整的 YYYY-MM-DD 格式）
+python scraper.py -s 2026-06-22
+
+# (可选) 如果只想针对某一用户抓取该日期的内容，可配合 -u 参数。
+# （此时将完全忽略 userid.txt 的增量时间戳，直接进行定向抓取）
+python scraper.py -s 2026-06-22 -u 6634214154
+```
+内置了转换算法，无论你传入哪种形态的 ID 或者是 `YYYY-MM-DD` 格式的日期，都能精准剥离并抓取。使用完整 URL 抓取或带有 `-u` 参数时，会强行跨越配置进行精准定点抓取，实现真正的指哪打哪。
+
 ### 第五步（可选）：清理本地特定微博数据
 如果你在抓取后发现某条微博的数据不需要，或者由于早期漏爬需要清空后重新抓取，可以通过命令行参数快速清理该条微博及其所有评论的本地记录：
 ```bash
@@ -98,10 +118,13 @@ python scraper.py -d R4gcQiHll
 # 或者传入纯数字的微博 ID：
 python scraper.py -d 5310156124456519
 
-# 也可以根据日期批量彻底删除当天的所有记录：
+# 也可以根据日期批量彻底删除当天所有用户的数据：
 python scraper.py -d 2026-06-22
+
+# (可选) 如果存在多个用户，配合 -u 参数精确定向删除指定用户的数据：
+python scraper.py -d 2026-06-22 -u 6634214154
 ```
-内置了转换算法，无论你传入哪种形态的 ID 或者是 YYYY-MM-DD 格式的日期，都能精准遍历并彻底剥离对应的 CSV、JSON、SQLite 和 Markdown 数据。
+内置了转换算法，无论你传入哪种形态的 ID 或者是日期，都能精准遍历并彻底剥离对应的 CSV、JSON、SQLite 和 Markdown 数据。
 
 ---
 
@@ -116,6 +139,10 @@ weibo-scraper/
 │       ├── posts.db                        # 本地 SQLite 数据库
 │       ├── posts.json                      # JSON 格式备份数据
 │       ├── 对应博主id.txt                   # 包含博主详细个人资料
+│       ├── avatar.jpg                      # 用户头像
+│       ├── avatar_hd.jpg                   # 用户高清头像
+│       ├── cover_image_phone.jpg           # 用户手机端主页背景图
+│       ├── cover_image_web.jpg             # 用户网页端主页背景图 (如果与手机端不同)
 │       └── YYYY-MM/ (月度归档，如: 2025-09)
 │           ├── YYYY-MM-DD.md               # 微博日记本 (按天归档，包含发布设备、发布位置以及附带地点的评论列表)
 │           ├── img/                        # 原创微博高清大图目录

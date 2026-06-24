@@ -87,6 +87,15 @@ If `TARGET_USER_IDS = "userid.txt"`, write target accounts inside the file (one 
 python scraper.py
 ```
 
+# 3. Re-crawl all records for a specific date
+# (⚠️ Note: This will iterate through all users in userid.txt by default. YYYY-MM-DD format is required)
+python scraper.py -s 2026-06-22
+
+# (Optional) If you only want to scrape a specific date for a specific user, use the -u parameter.
+# (This completely ignores the timestamp config in userid.txt and does a targeted scrape)
+python scraper.py -s 2026-06-22 -u 6634214154
+```
+
 ### Step 5 (Optional): Clean Up Local Data for a Specific Post
 If you find that a certain post's data is no longer needed after crawling, or if you need to clear it and re-crawl due to missing data in an early run, you can use a command-line argument to quickly and thoroughly clean up the local records of that post and all its comments:
 ```bash
@@ -95,8 +104,11 @@ python scraper.py -d R4gcQiHll
 # Or pass the pure numeric Weibo ID:
 python scraper.py -d 5310156124456519
 
-# Or delete all records for a specific date in bulk:
+# Delete all records for a specific date in bulk:
 python scraper.py -d 2026-06-22
+
+# (Optional) Precisely target a single user's records for deletion with the -u parameter:
+python scraper.py -d 2026-06-22 -u 6634214154
 ```
 A built-in conversion algorithm ensures that no matter which form of ID or YYYY-MM-DD date you provide, the program accurately scans and completely strips out the corresponding CSV, JSON, SQLite, and Markdown data.
 
@@ -113,6 +125,10 @@ weibo-scraper/
 │       ├── posts.db                        # Local SQLite database
 │       ├── posts.json                      # JSON backup records
 │       ├── user_id.txt                     # Includes Detailed User Information fields
+│       ├── avatar.jpg                      # User profile avatar
+│       ├── avatar_hd.jpg                   # High-definition user profile avatar
+│       ├── cover_image_phone.jpg           # User's mobile profile background cover
+│       ├── cover_image_web.jpg             # User's desktop profile background cover (if different)
 │       └── YYYY-MM/ (Monthly subfolder, e.g. 2025-09)
 │           ├── YYYY-MM-DD.md               # Post diary (organized by day, including device, location, and comments with regions)
 │           ├── img/                        # Original high-resolution images
