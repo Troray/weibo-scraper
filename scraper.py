@@ -3031,16 +3031,26 @@ def delete_local_post_data(post_id, target_uid=None):
     deleted_count = {"csv": 0, "json": 0, "sqlite": 0, "md": 0}
     
     for ud in user_dirs:
-        month_str = target_date[:7]
+        # 优化：精准投递，避免遍历 img/video 等媒体子目录
         target_files = [
             os.path.join(ud, 'posts.json'),
             os.path.join(ud, 'posts.csv'),
             os.path.join(ud, 'posts.db'),
             os.path.join(ud, 'comments.json'),
             os.path.join(ud, 'comments.csv'),
-            os.path.join(ud, 'comments.db'),
-            os.path.join(ud, month_str, f"{target_date}.md")
+            os.path.join(ud, 'comments.db')
         ]
+        # 收集所有的 markdown 存档文件
+        try:
+            for item in os.listdir(ud):
+                if re.match(r'^\d{4}-\d{2}$', item):
+                    month_dir = os.path.join(ud, item)
+                    if os.path.isdir(month_dir):
+                        for md_file in os.listdir(month_dir):
+                            if md_file.endswith('.md'):
+                                target_files.append(os.path.join(month_dir, md_file))
+        except Exception:
+            pass
         for file_path in target_files:
             if not os.path.exists(file_path):
                 continue
