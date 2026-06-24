@@ -3433,7 +3433,7 @@ def delete_local_data_by_date(target_date, target_uid=None):
                         for p in posts:
                             pid = str(p.get("id", ""))
                             time_str = p.get("time_str", "")
-                            if target_date in file or any(d_id in pid for d_id in deleted_post_ids):
+                            if target_date in file_path or target_date in time_str or any(d_id in pid for d_id in deleted_post_ids):
                                 pass
                             else:
                                 new_posts.append(p)
