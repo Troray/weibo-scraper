@@ -151,11 +151,11 @@ def parse_weibo_stats(stats_text):
             try:
                 val = float(num_str.replace('万', '').strip())
                 return int(val * 10000)
-            except:
+            except Exception:
                 return 0
         try:
             return int(num_str)
-        except:
+        except Exception:
             return 0
 
     # 检查是否是纯数字和空格（例如旧格式的 stats_raw "17 342 1621"）
@@ -1205,13 +1205,14 @@ def load_existing_post_ids(user_name):
 
 
 def scrape_weibo_search(scrape_target=None, target_uid=None):
-    global START_DATE, END_DATE
+    local_start_date = START_DATE
+    local_end_date = END_DATE
     target_mid = None
     target_bid = None
     if scrape_target:
         if re.match(r'^\d{4}-\d{2}-\d{2}$', scrape_target):
-            START_DATE = scrape_target
-            END_DATE = scrape_target
+            local_start_date = scrape_target
+            local_end_date = scrape_target
         elif re.match(r'^\d{2}-\d{2}$', scrape_target):
             print("错误: 不支持仅输入 MM-DD 格式的日期，请使用完整的 YYYY-MM-DD 格式。")
             sys.exit(1)
@@ -1295,16 +1296,16 @@ def scrape_weibo_search(scrape_target=None, target_uid=None):
                 user_start_dt = user_info["start_time"]
                 user_start_date_str = user_start_dt.strftime("%Y-%m-%d")
             else:
-                if START_DATE:
-                    user_start_dt = datetime.strptime(START_DATE, "%Y-%m-%d")
-                    user_start_date_str = START_DATE
+                if local_start_date:
+                    user_start_dt = datetime.strptime(local_start_date, "%Y-%m-%d")
+                    user_start_date_str = local_start_date
                 else:
                     user_start_dt = run_start_time
                     user_start_date_str = run_start_time.strftime("%Y-%m-%d")
             
-            if END_DATE:
-                user_end_dt = datetime.strptime(END_DATE, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
-                user_end_date_str = END_DATE
+            if local_end_date:
+                user_end_dt = datetime.strptime(local_end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+                user_end_date_str = local_end_date
             else:
                 user_end_dt = run_start_time
                 user_end_date_str = run_start_time.strftime("%Y-%m-%d")
@@ -1388,7 +1389,7 @@ def scrape_weibo_search(scrape_target=None, target_uid=None):
                 while True:
                     try:
                         page.wait_for_load_state("domcontentloaded", timeout=30000)
-                    except:
+                    except Exception:
                         print("页面加载超时，尝试继续...")
 
                     # 检查是否有结果
@@ -1561,7 +1562,7 @@ def scrape_weibo_search(scrape_target=None, target_uid=None):
                                 try:
                                     expand_btn.evaluate("el => el.click()")
                                     page.wait_for_timeout(500)
-                                except:
+                                except Exception:
                                     pass
                             
                             # 4. 提取正文
@@ -1639,7 +1640,7 @@ def scrape_weibo_search(scrape_target=None, target_uid=None):
                                     if not retweet_content:
                                         try:
                                             retweet_content = retweet_box.locator("p.txt").first.evaluate(js_preserve_emojis).strip()
-                                        except:
+                                        except Exception:
                                             pass
                                             
                                     # 清理转发微博正文末尾多余的“收起d”、“展开c”等字符
@@ -1855,7 +1856,7 @@ def scrape_weibo_search(scrape_target=None, target_uid=None):
 
         try:
             headless_browser.close()
-        except:
+        except Exception:
             pass
 
 
@@ -1874,16 +1875,22 @@ def parse_markdown_posts(file_path):
         print(f"⚠️ 读取 Markdown 文件失败: {e}")
         return []
 
-    # 按 "\n## " 分割各条微博
-    parts = content.split("\n## ")
+    # 使用强正则按 \n## HH:MM:SS 分割各条微博，防止被用户正文中的 `## ` 截断
+    parts = re.split(r'\n## (?=\d{2}:\d{2}:\d{2})', content)
     if len(parts) <= 1:
-        parts = content.split("## ")
+        # 如果第一条就在文件头部，可能没有前导的 \n
+        parts = re.split(r'^## (?=\d{2}:\d{2}:\d{2})', content, flags=re.MULTILINE)
         if len(parts) <= 1:
             return []
 
     posts = []
     start_idx = 1
-    if parts[0].startswith("## "):
+    # 如果用 MULTILINE 切分，或者文件开头恰好满足，第一部分可能是空字符串或者无关的头信息
+    # 只要 parts[0] 是空字符串且有后续部分，我们也可以跳过 parts[0]
+    if parts[0].strip() == "":
+        start_idx = 1
+    # 原本的兼容性处理，以防意外
+    elif parts[0].startswith("## "):
         start_idx = 0
         parts[0] = parts[0][3:]
 
@@ -3021,7 +3028,7 @@ def delete_local_post_data(post_id, target_uid=None):
                             content = f.read()
                         if target_id not in content and target_bid not in content:
                             continue
-                    except:
+                    except Exception:
                         pass
             
                 # 处理 JSON 文件
@@ -3189,7 +3196,7 @@ def delete_local_data_by_date(target_date, target_uid=None):
                         with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                             if target_date not in f.read():
                                 continue
-                    except:
+                    except Exception:
                         pass
             
                 if file.endswith('.json'):
@@ -3201,7 +3208,7 @@ def delete_local_data_by_date(target_date, target_uid=None):
                                 if str(item.get('time', '')).startswith(target_date):
                                     if 'id' in item: deleted_post_ids.add(str(item['id']))
                                     if 'bid' in item: deleted_post_ids.add(str(item['bid']))
-                    except: pass
+                    except Exception: pass
                 elif file.endswith('.csv'):
                     try:
                         df = pd.read_csv(file_path, dtype=str)
@@ -3210,7 +3217,7 @@ def delete_local_data_by_date(target_date, target_uid=None):
                             for _, row in df[mask].iterrows():
                                 if 'id' in row and pd.notna(row['id']): deleted_post_ids.add(str(row['id']))
                                 if 'bid' in row and pd.notna(row['bid']): deleted_post_ids.add(str(row['bid']))
-                    except: pass
+                    except Exception: pass
                 elif file.endswith('.db'):
                     try:
                         conn = sqlite3.connect(file_path)
@@ -3223,7 +3230,7 @@ def delete_local_data_by_date(target_date, target_uid=None):
                                 if row[0]: deleted_post_ids.add(str(row[0]))
                                 if len(row) > 1 and row[1]: deleted_post_ids.add(str(row[1]))
                         conn.close()
-                    except: pass
+                    except Exception: pass
 
     print(f"找到 {len(deleted_post_ids)} 个相关微博 ID，开始清理...")
     
@@ -3239,7 +3246,7 @@ def delete_local_data_by_date(target_date, target_uid=None):
                             content = f.read()
                             if target_date not in content and not any(d_id in content for d_id in deleted_post_ids):
                                 continue
-                    except:
+                    except Exception:
                         pass
             
                 # 处理 JSON 文件
