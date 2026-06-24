@@ -3026,7 +3026,7 @@ def delete_local_post_data(post_id, target_uid=None):
             print(f"未找到对应 UID {target_uid} 的本地数据目录。")
             return
     else:
-        user_dirs = [base_dir]
+        user_dirs = [os.path.join(base_dir, d) for d in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, d))]
         
     deleted_count = {"csv": 0, "json": 0, "sqlite": 0, "md": 0}
     
@@ -3047,139 +3047,140 @@ def delete_local_post_data(post_id, target_uid=None):
                     month_dir = os.path.join(ud, item)
                     if os.path.isdir(month_dir):
                         for md_file in os.listdir(month_dir):
-                            if md_file.endswith('.md'):
+                            if md_file.endswith('.md') or md_file.endswith('.txt'):
                                 target_files.append(os.path.join(month_dir, md_file))
-        except Exception:
-            pass
+        except Exception as e:
+            print("COLLECT ERROR:", e)
         for file_path in target_files:
+            print("Target file:", file_path)
             if not os.path.exists(file_path):
                 continue
 
             
-                # 快速预过滤，极大提升删除速度
-                if file.endswith(('.json', '.csv', '.md', '.txt')):
-                    try:
-                        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                            content = f.read()
-                        if target_id not in content and target_bid not in content:
+            # 快速预过滤，极大提升删除速度
+            if file_path.endswith(('.json', '.csv', '.md', '.txt')):
+                try:
+                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read()
+                    if target_id not in content and target_bid not in content:
                             continue
-                    except Exception:
-                        pass
+                except Exception:
+                    pass
             
-                # 处理 JSON 文件
-                if file.endswith('.json'):
-                    try:
-                        with open(file_path, 'r', encoding='utf-8') as f:
-                            data = json.load(f)
-                    
-                        if isinstance(data, list):
-                            original_len = len(data)
-                            new_data = [item for item in data if str(item.get('id', '')) not in (target_id, target_bid) and str(item.get('bid', '')) not in (target_id, target_bid)]
-                            if len(new_data) < original_len:
-                                with open(file_path, 'w', encoding='utf-8') as f:
-                                    json.dump(new_data, f, ensure_ascii=False, indent=2)
-                                deleted_count["json"] += (original_len - len(new_data))
-                                print(f"  [JSON] 已从 {file_path} 中删除 {(original_len - len(new_data))} 条记录")
-                    except Exception as e:
-                        print(f"  读取/修改 JSON 出错: {file_path}, 错误: {e}")
-                    
-                # 处理 CSV 文件
-                elif file.endswith('.csv'):
-                    try:
-                        df = pd.read_csv(file_path, dtype=str)
-                        original_len = len(df)
-                    
-                        # 宽松匹配，只要行内任何一列包含 target_id 或 target_bid，就干掉
-                        mask = pd.Series([False] * len(df), index=df.index)
-                        for col in df.columns:
-                            col_str = df[col].astype(str)
-                            mask = mask | col_str.str.contains(target_id, regex=False) | col_str.str.contains(target_bid, regex=False)
-                    
-                        new_df = df[~mask]
-                        if len(new_df) < original_len:
-                            new_df.to_csv(file_path, index=False, encoding='utf-8-sig')
-                            deleted_count["csv"] += (original_len - len(new_df))
-                            print(f"  [CSV] 已从 {file_path} 中删除 {(original_len - len(new_df))} 条记录")
-                    except Exception as e:
-                        pass
-                    
-                # 处理 SQLite 文件
-                elif file.endswith('.db'):
-                    try:
-                        conn = sqlite3.connect(file_path)
-                        cursor = conn.cursor()
-                    
-                        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-                        tables = [row[0] for row in cursor.fetchall()]
-                    
-                        if 'tweets' in tables:
-                            cursor.execute("PRAGMA table_info(tweets)")
-                            columns = [c[1] for c in cursor.fetchall()]
-                            if 'bid' in columns:
-                                cursor.execute("DELETE FROM tweets WHERE id=? OR id=? OR bid=? OR bid=?", (target_id, target_bid, target_id, target_bid))
+            # 处理 JSON 文件
+            if file_path.endswith('.json'):
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                
+                    if isinstance(data, list):
+                        original_len = len(data)
+                        new_data = [item for item in data if str(item.get('id', '')) not in (target_id, target_bid) and str(item.get('bid', '')) not in (target_id, target_bid)]
+                        if len(new_data) < original_len:
+                            with open(file_path, 'w', encoding='utf-8') as f:
+                                json.dump(new_data, f, ensure_ascii=False, indent=2)
+                            deleted_count["json"] += (original_len - len(new_data))
+                            print(f"  [JSON] 已从 {file_path} 中删除 {(original_len - len(new_data))} 条记录")
+                except Exception as e:
+                    print(f"  读取/修改 JSON 出错: {file_path}, 错误: {e}")
+                
+            # 处理 CSV 文件
+            elif file_path.endswith('.csv'):
+                try:
+                    df = pd.read_csv(file_path, dtype=str)
+                    original_len = len(df)
+                
+                    # 宽松匹配，只要行内任何一列包含 target_id 或 target_bid，就干掉
+                    mask = pd.Series([False] * len(df), index=df.index)
+                    for col in df.columns:
+                        col_str = df[col].astype(str)
+                        mask = mask | col_str.str.contains(target_id, regex=False) | col_str.str.contains(target_bid, regex=False)
+                
+                    new_df = df[~mask]
+                    if len(new_df) < original_len:
+                        new_df.to_csv(file_path, index=False, encoding='utf-8-sig')
+                        deleted_count["csv"] += (original_len - len(new_df))
+                        print(f"  [CSV] 已从 {file_path} 中删除 {(original_len - len(new_df))} 条记录")
+                except Exception as e:
+                    pass
+                
+            # 处理 SQLite 文件
+            elif file_path.endswith('.db'):
+                try:
+                    conn = sqlite3.connect(file_path)
+                    cursor = conn.cursor()
+                
+                    cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                    tables = [row[0] for row in cursor.fetchall()]
+                
+                    if 'tweets' in tables:
+                        cursor.execute("PRAGMA table_info(tweets)")
+                        columns = [c[1] for c in cursor.fetchall()]
+                        if 'bid' in columns:
+                            cursor.execute("DELETE FROM tweets WHERE id=? OR id=? OR bid=? OR bid=?", (target_id, target_bid, target_id, target_bid))
+                        else:
+                            cursor.execute("DELETE FROM tweets WHERE id=? OR id=?", (target_id, target_bid))
+                        if cursor.rowcount > 0:
+                            deleted_count["sqlite"] += cursor.rowcount
+                            print(f"  [SQLite] 从 {file_path} 的 tweets 表中删除 {cursor.rowcount} 条记录")
+                        
+                    if 'comments' in tables:
+                        cursor.execute("DELETE FROM comments WHERE post_id=? OR post_id=?", (target_id, target_bid))
+                        if cursor.rowcount > 0:
+                            deleted_count["sqlite"] += cursor.rowcount
+                            print(f"  [SQLite] 从 {file_path} 的 comments 表中删除 {cursor.rowcount} 条记录")
+                        
+                    if 'replies' in tables:
+                        cursor.execute("DELETE FROM replies WHERE post_id=? OR post_id=?", (target_id, target_bid))
+                        if cursor.rowcount > 0:
+                            deleted_count["sqlite"] += cursor.rowcount
+                            print(f"  [SQLite] 从 {file_path} 的 replies 表中删除 {cursor.rowcount} 条记录")
+                        
+                    conn.commit()
+                    conn.close()
+                except Exception as e:
+                    print(f"  读取/修改 SQLite 出错: {file_path}, 错误: {e}")
+                
+            # 处理 Markdown 文件
+            elif file_path.endswith('.md') or file_path.endswith('.txt'):
+                try:
+                    posts = parse_markdown_posts(file_path)
+                    original_len = len(posts)
+                    if original_len > 0:
+                        new_posts = []
+                        for p in posts:
+                            pid = str(p.get("id", ""))
+                            body_content = p.get("body", "")
+                            # 宽松匹配
+                            if target_id in pid or target_bid in pid or target_id in body_content or target_bid in body_content:
+                                pass
                             else:
-                                cursor.execute("DELETE FROM tweets WHERE id=? OR id=?", (target_id, target_bid))
-                            if cursor.rowcount > 0:
-                                deleted_count["sqlite"] += cursor.rowcount
-                                print(f"  [SQLite] 从 {file_path} 的 tweets 表中删除 {cursor.rowcount} 条记录")
+                                new_posts.append(p)
                             
-                        if 'comments' in tables:
-                            cursor.execute("DELETE FROM comments WHERE post_id=? OR post_id=?", (target_id, target_bid))
-                            if cursor.rowcount > 0:
-                                deleted_count["sqlite"] += cursor.rowcount
-                                print(f"  [SQLite] 从 {file_path} 的 comments 表中删除 {cursor.rowcount} 条记录")
-                            
-                        if 'replies' in tables:
-                            cursor.execute("DELETE FROM replies WHERE post_id=? OR post_id=?", (target_id, target_bid))
-                            if cursor.rowcount > 0:
-                                deleted_count["sqlite"] += cursor.rowcount
-                                print(f"  [SQLite] 从 {file_path} 的 replies 表中删除 {cursor.rowcount} 条记录")
-                            
-                        conn.commit()
-                        conn.close()
-                    except Exception as e:
-                        print(f"  读取/修改 SQLite 出错: {file_path}, 错误: {e}")
-                    
-                # 处理 Markdown 文件
-                elif file.endswith('.md') or file.endswith('.txt'):
-                    try:
-                        posts = parse_markdown_posts(file_path)
-                        original_len = len(posts)
-                        if original_len > 0:
-                            new_posts = []
-                            for p in posts:
-                                pid = str(p.get("id", ""))
-                                body_content = p.get("body", "")
-                                # 宽松匹配
-                                if target_id in pid or target_bid in pid or target_id in body_content or target_bid in body_content:
-                                    pass
-                                else:
-                                    new_posts.append(p)
+                        if len(new_posts) < original_len:
+                            if len(new_posts) == 0:
+                                import os
+                                os.remove(file_path)
+                                deleted_count["md"] += original_len
+                                print(f"  [Markdown] 已删除文件 {file_path}")
+                            else:
+                                with open(file_path, "r", encoding="utf-8") as f:
+                                    first_line = f.readline()
                                 
-                            if len(new_posts) < original_len:
-                                if len(new_posts) == 0:
-                                    import os
-                                    os.remove(file_path)
-                                    deleted_count["md"] += original_len
-                                    print(f"  [Markdown] 已删除文件 {file_path}")
-                                else:
-                                    with open(file_path, "r", encoding="utf-8") as f:
-                                        first_line = f.readline()
+                                with open(file_path, "w", encoding="utf-8") as f:
+                                    if first_line.startswith("# "):
+                                        f.write(first_line.strip() + "\n\n")
+                                    else:
+                                        f.write("# 微博存档\n\n")
                                     
-                                    with open(file_path, "w", encoding="utf-8") as f:
-                                        if first_line.startswith("# "):
-                                            f.write(first_line.strip() + "\n\n")
-                                        else:
-                                            f.write("# 微博存档\n\n")
-                                        
-                                        for p in new_posts:
-                                            f.write(f"## {p['time_str']}\n\n")
-                                            f.write(f"{p['body']}\n\n")
-                                            f.write(f"---\n\n")
-                                    deleted_count["md"] += (original_len - len(new_posts))
-                                    print(f"  [Markdown] 已从 {file_path} 中删除 {(original_len - len(new_posts))} 条记录")
-                    except Exception:
-                        pass
+                                    for p in new_posts:
+                                        f.write(f"## {p['time_str']}\n\n")
+                                        f.write(f"{p['body']}\n\n")
+                                        f.write(f"---\n\n")
+                                deleted_count["md"] += (original_len - len(new_posts))
+                                print(f"  [Markdown] 已从 {file_path} 中删除 {(original_len - len(new_posts))} 条记录")
+                except Exception:
+                    pass
 
     print("\n--- 清理完成 ---")
     print(f"共删除 JSON 记录: {deleted_count['json']} 条")
@@ -3214,7 +3215,7 @@ def delete_local_data_by_date(target_date, target_uid=None):
             print(f"未找到对应 UID {target_uid} 的本地数据目录。")
             return
     else:
-        user_dirs = [base_dir]
+        user_dirs = [os.path.join(base_dir, d) for d in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, d))]
         
     deleted_count = {"csv": 0, "json": 0, "sqlite": 0, "md": 0}
     deleted_post_ids = set()
@@ -3233,7 +3234,7 @@ def delete_local_data_by_date(target_date, target_uid=None):
 
             
                 # 快速预过滤
-                if file.endswith(('.json', '.csv', '.md', '.txt')):
+                if file_path.endswith(('.json', '.csv', '.md', '.txt')):
                     try:
                         with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                             if target_date not in f.read():
@@ -3241,7 +3242,7 @@ def delete_local_data_by_date(target_date, target_uid=None):
                     except Exception:
                         pass
             
-                if file.endswith('.json'):
+                if file_path.endswith('.json'):
                     try:
                         with open(file_path, 'r', encoding='utf-8') as f:
                             data = json.load(f)
@@ -3251,7 +3252,7 @@ def delete_local_data_by_date(target_date, target_uid=None):
                                     if 'id' in item: deleted_post_ids.add(str(item['id']))
                                     if 'bid' in item: deleted_post_ids.add(str(item['bid']))
                     except Exception: pass
-                elif file.endswith('.csv'):
+                elif file_path.endswith('.csv'):
                     try:
                         df = pd.read_csv(file_path, dtype=str)
                         if 'time' in df.columns:
@@ -3260,7 +3261,7 @@ def delete_local_data_by_date(target_date, target_uid=None):
                                 if 'id' in row and pd.notna(row['id']): deleted_post_ids.add(str(row['id']))
                                 if 'bid' in row and pd.notna(row['bid']): deleted_post_ids.add(str(row['bid']))
                     except Exception: pass
-                elif file.endswith('.db'):
+                elif file_path.endswith('.db'):
                     try:
                         conn = sqlite3.connect(file_path)
                         cursor = conn.cursor()
@@ -3292,146 +3293,146 @@ def delete_local_data_by_date(target_date, target_uid=None):
                 continue
 
             
-                # 快速预过滤
-                if file.endswith(('.json', '.csv', '.md', '.txt')):
-                    try:
-                        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                            content = f.read()
-                            if target_date not in content and not any(d_id in content for d_id in deleted_post_ids):
+            # 快速预过滤
+            if file_path.endswith(('.json', '.csv', '.md', '.txt')):
+                try:
+                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read()
+                        if target_date not in content and not any(d_id in content for d_id in deleted_post_ids):
                                 continue
-                    except Exception:
-                        pass
+                except Exception:
+                    pass
             
-                # 处理 JSON 文件
-                if file.endswith('.json'):
-                    try:
-                        with open(file_path, 'r', encoding='utf-8') as f:
-                            data = json.load(f)
-                    
-                        if isinstance(data, list):
-                            original_len = len(data)
-                            new_data = []
-                            for item in data:
-                                is_match = False
-                                if str(item.get('time', '')).startswith(target_date):
-                                    is_match = True
-                                elif str(item.get('id', '')) in deleted_post_ids or str(item.get('bid', '')) in deleted_post_ids:
-                                    is_match = True
-                                elif str(item.get('post_id', '')) in deleted_post_ids:
-                                    is_match = True
-                            
-                                if not is_match:
-                                    new_data.append(item)
-                                
-                            if len(new_data) < original_len:
-                                with open(file_path, 'w', encoding='utf-8') as f:
-                                    json.dump(new_data, f, ensure_ascii=False, indent=2)
-                                deleted_count["json"] += (original_len - len(new_data))
-                                print(f"  [JSON] 已从 {file_path} 中删除 {(original_len - len(new_data))} 条记录")
-                    except Exception as e:
-                        print(f"  读取/修改 JSON 出错: {file_path}, 错误: {e}")
-                    
-                # 处理 CSV 文件
-                elif file.endswith('.csv'):
-                    try:
-                        df = pd.read_csv(file_path, dtype=str)
-                        original_len = len(df)
-                    
-                        mask_time = pd.Series([False]*len(df), index=df.index)
-                        if 'time' in df.columns:
-                            mask_time = df['time'].astype(str).str.startswith(target_date)
+            # 处理 JSON 文件
+            if file_path.endswith('.json'):
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                
+                    if isinstance(data, list):
+                        original_len = len(data)
+                        new_data = []
+                        for item in data:
+                            is_match = False
+                            if str(item.get('time', '')).startswith(target_date):
+                                is_match = True
+                            elif str(item.get('id', '')) in deleted_post_ids or str(item.get('bid', '')) in deleted_post_ids:
+                                is_match = True
+                            elif str(item.get('post_id', '')) in deleted_post_ids:
+                                is_match = True
                         
-                        mask_id = pd.Series([False]*len(df), index=df.index)
-                        if 'id' in df.columns:
-                            mask_id = mask_id | df['id'].astype(str).isin(deleted_post_ids)
-                        if 'bid' in df.columns:
-                            mask_id = mask_id | df['bid'].astype(str).isin(deleted_post_ids)
-                        if 'post_id' in df.columns:
-                            mask_id = mask_id | df['post_id'].astype(str).isin(deleted_post_ids)
-                    
-                        mask = mask_time | mask_id
-                        new_df = df[~mask]
-                        if len(new_df) < original_len:
-                            new_df.to_csv(file_path, index=False, encoding='utf-8-sig')
-                            deleted_count["csv"] += (original_len - len(new_df))
-                            print(f"  [CSV] 已从 {file_path} 中删除 {(original_len - len(new_df))} 条记录")
-                    except Exception as e:
-                        pass
-                    
-                # 处理 SQLite 文件
-                elif file.endswith('.db'):
-                    try:
-                        conn = sqlite3.connect(file_path)
-                        cursor = conn.cursor()
-                    
-                        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-                        tables = [row[0] for row in cursor.fetchall()]
-                    
-                        ids_tuple = tuple(deleted_post_ids) if deleted_post_ids else ('',)
-                        placeholders = ','.join(['?'] * len(ids_tuple))
-                    
-                        if 'tweets' in tables:
-                            cursor.execute(f"DELETE FROM tweets WHERE time LIKE ? OR id IN ({placeholders}) OR bid IN ({placeholders})", (f"{target_date}%",) + ids_tuple + ids_tuple)
-                            if cursor.rowcount > 0:
-                                deleted_count["sqlite"] += cursor.rowcount
-                                print(f"  [SQLite] 从 {file_path} 的 tweets 表中删除 {cursor.rowcount} 条记录")
+                            if not is_match:
+                                new_data.append(item)
                             
-                        if 'comments' in tables:
-                            cursor.execute(f"DELETE FROM comments WHERE time LIKE ? OR post_id IN ({placeholders})", (f"{target_date}%",) + ids_tuple)
-                            if cursor.rowcount > 0:
-                                deleted_count["sqlite"] += cursor.rowcount
-                                print(f"  [SQLite] 从 {file_path} 的 comments 表中删除 {cursor.rowcount} 条记录")
-                            
-                        if 'replies' in tables:
-                            cursor.execute(f"DELETE FROM replies WHERE time LIKE ? OR post_id IN ({placeholders})", (f"{target_date}%",) + ids_tuple)
-                            if cursor.rowcount > 0:
-                                deleted_count["sqlite"] += cursor.rowcount
-                                print(f"  [SQLite] 从 {file_path} 的 replies 表中删除 {cursor.rowcount} 条记录")
-                            
-                        conn.commit()
-                        conn.close()
-                    except Exception as e:
-                        print(f"  读取/修改 SQLite 出错: {file_path}, 错误: {e}")
+                        if len(new_data) < original_len:
+                            with open(file_path, 'w', encoding='utf-8') as f:
+                                json.dump(new_data, f, ensure_ascii=False, indent=2)
+                            deleted_count["json"] += (original_len - len(new_data))
+                            print(f"  [JSON] 已从 {file_path} 中删除 {(original_len - len(new_data))} 条记录")
+                except Exception as e:
+                    print(f"  读取/修改 JSON 出错: {file_path}, 错误: {e}")
+                
+            # 处理 CSV 文件
+            elif file_path.endswith('.csv'):
+                try:
+                    df = pd.read_csv(file_path, dtype=str)
+                    original_len = len(df)
+                
+                    mask_time = pd.Series([False]*len(df), index=df.index)
+                    if 'time' in df.columns:
+                        mask_time = df['time'].astype(str).str.startswith(target_date)
                     
-                # 处理 Markdown 文件
-                elif file.endswith('.md') or file.endswith('.txt'):
-                    try:
-                        posts = parse_markdown_posts(file_path)
-                        original_len = len(posts)
-                        if original_len > 0:
-                            new_posts = []
-                            for p in posts:
-                                pid = str(p.get("id", ""))
-                                time_str = p.get("time_str", "")
-                                if target_date in file or any(d_id in pid for d_id in deleted_post_ids):
-                                    pass
-                                else:
-                                    new_posts.append(p)
+                    mask_id = pd.Series([False]*len(df), index=df.index)
+                    if 'id' in df.columns:
+                        mask_id = mask_id | df['id'].astype(str).isin(deleted_post_ids)
+                    if 'bid' in df.columns:
+                        mask_id = mask_id | df['bid'].astype(str).isin(deleted_post_ids)
+                    if 'post_id' in df.columns:
+                        mask_id = mask_id | df['post_id'].astype(str).isin(deleted_post_ids)
+                
+                    mask = mask_time | mask_id
+                    new_df = df[~mask]
+                    if len(new_df) < original_len:
+                        new_df.to_csv(file_path, index=False, encoding='utf-8-sig')
+                        deleted_count["csv"] += (original_len - len(new_df))
+                        print(f"  [CSV] 已从 {file_path} 中删除 {(original_len - len(new_df))} 条记录")
+                except Exception as e:
+                    pass
+                
+            # 处理 SQLite 文件
+            elif file_path.endswith('.db'):
+                try:
+                    conn = sqlite3.connect(file_path)
+                    cursor = conn.cursor()
+                
+                    cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                    tables = [row[0] for row in cursor.fetchall()]
+                
+                    ids_tuple = tuple(deleted_post_ids) if deleted_post_ids else ('',)
+                    placeholders = ','.join(['?'] * len(ids_tuple))
+                
+                    if 'tweets' in tables:
+                        cursor.execute(f"DELETE FROM tweets WHERE time LIKE ? OR id IN ({placeholders}) OR bid IN ({placeholders})", (f"{target_date}%",) + ids_tuple + ids_tuple)
+                        if cursor.rowcount > 0:
+                            deleted_count["sqlite"] += cursor.rowcount
+                            print(f"  [SQLite] 从 {file_path} 的 tweets 表中删除 {cursor.rowcount} 条记录")
+                        
+                    if 'comments' in tables:
+                        cursor.execute(f"DELETE FROM comments WHERE time LIKE ? OR post_id IN ({placeholders})", (f"{target_date}%",) + ids_tuple)
+                        if cursor.rowcount > 0:
+                            deleted_count["sqlite"] += cursor.rowcount
+                            print(f"  [SQLite] 从 {file_path} 的 comments 表中删除 {cursor.rowcount} 条记录")
+                        
+                    if 'replies' in tables:
+                        cursor.execute(f"DELETE FROM replies WHERE time LIKE ? OR post_id IN ({placeholders})", (f"{target_date}%",) + ids_tuple)
+                        if cursor.rowcount > 0:
+                            deleted_count["sqlite"] += cursor.rowcount
+                            print(f"  [SQLite] 从 {file_path} 的 replies 表中删除 {cursor.rowcount} 条记录")
+                        
+                    conn.commit()
+                    conn.close()
+                except Exception as e:
+                    print(f"  读取/修改 SQLite 出错: {file_path}, 错误: {e}")
+                
+            # 处理 Markdown 文件
+            elif file_path.endswith('.md') or file_path.endswith('.txt'):
+                try:
+                    posts = parse_markdown_posts(file_path)
+                    original_len = len(posts)
+                    if original_len > 0:
+                        new_posts = []
+                        for p in posts:
+                            pid = str(p.get("id", ""))
+                            time_str = p.get("time_str", "")
+                            if target_date in file or any(d_id in pid for d_id in deleted_post_ids):
+                                pass
+                            else:
+                                new_posts.append(p)
+                            
+                        if len(new_posts) < original_len:
+                            if len(new_posts) == 0:
+                                import os
+                                os.remove(file_path)
+                                deleted_count["md"] += original_len
+                                print(f"  [Markdown] 已删除文件 {file_path}")
+                            else:
+                                with open(file_path, "r", encoding="utf-8") as f:
+                                    first_line = f.readline()
                                 
-                            if len(new_posts) < original_len:
-                                if len(new_posts) == 0:
-                                    import os
-                                    os.remove(file_path)
-                                    deleted_count["md"] += original_len
-                                    print(f"  [Markdown] 已删除文件 {file_path}")
-                                else:
-                                    with open(file_path, "r", encoding="utf-8") as f:
-                                        first_line = f.readline()
+                                with open(file_path, "w", encoding="utf-8") as f:
+                                    if first_line.startswith("# "):
+                                        f.write(first_line.strip() + "\n\n")
+                                    else:
+                                        f.write("# 微博存档\n\n")
                                     
-                                    with open(file_path, "w", encoding="utf-8") as f:
-                                        if first_line.startswith("# "):
-                                            f.write(first_line.strip() + "\n\n")
-                                        else:
-                                            f.write("# 微博存档\n\n")
-                                        
-                                        for p in new_posts:
-                                            f.write(f"## {p['time_str']}\n\n")
-                                            f.write(f"{p['body']}\n\n")
-                                            f.write(f"---\n\n")
-                                    deleted_count["md"] += (original_len - len(new_posts))
-                                    print(f"  [Markdown] 已从 {file_path} 中删除 {(original_len - len(new_posts))} 条记录")
-                    except Exception:
-                        pass
+                                    for p in new_posts:
+                                        f.write(f"## {p['time_str']}\n\n")
+                                        f.write(f"{p['body']}\n\n")
+                                        f.write(f"---\n\n")
+                                deleted_count["md"] += (original_len - len(new_posts))
+                                print(f"  [Markdown] 已从 {file_path} 中删除 {(original_len - len(new_posts))} 条记录")
+                except Exception:
+                    pass
 
     print("\n--- 清理完成 ---")
     print(f"共删除 JSON 记录: {deleted_count['json']} 条")
