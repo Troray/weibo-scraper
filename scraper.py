@@ -3046,6 +3046,14 @@ def delete_local_post_data(post_id, target_uid=None):
                 if re.match(r'^\d{4}-\d{2}$', item):
                     month_dir = os.path.join(ud, item)
                     if os.path.isdir(month_dir):
+                        target_files.extend([
+                            os.path.join(month_dir, f"posts_{item}.json"),
+                            os.path.join(month_dir, f"posts_{item}.csv"),
+                            os.path.join(month_dir, f"posts_{item}.db"),
+                            os.path.join(month_dir, f"comments_{item}.json"),
+                            os.path.join(month_dir, f"comments_{item}.csv"),
+                            os.path.join(month_dir, f"comments_{item}.db")
+                        ])
                         for md_file in os.listdir(month_dir):
                             if md_file.endswith('.md') or md_file.endswith('.txt'):
                                 target_files.append(os.path.join(month_dir, md_file))
@@ -3228,52 +3236,63 @@ def delete_local_data_by_date(target_date, target_uid=None):
             os.path.join(ud, 'posts.csv'),
             os.path.join(ud, 'posts.db')
         ]
+        try:
+            for item in os.listdir(ud):
+                if re.match(r'^\d{4}-\d{2}$', item):
+                    month_dir = os.path.join(ud, item)
+                    if os.path.isdir(month_dir):
+                        primary_files.extend([
+                            os.path.join(month_dir, f"posts_{item}.json"),
+                            os.path.join(month_dir, f"posts_{item}.csv"),
+                            os.path.join(month_dir, f"posts_{item}.db")
+                        ])
+        except Exception: pass
         for file_path in primary_files:
             if not os.path.exists(file_path):
                 continue
 
             
-                # 快速预过滤
-                if file_path.endswith(('.json', '.csv', '.md', '.txt')):
-                    try:
-                        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                            if target_date not in f.read():
-                                continue
-                    except Exception:
-                        pass
-            
-                if file_path.endswith('.json'):
-                    try:
-                        with open(file_path, 'r', encoding='utf-8') as f:
-                            data = json.load(f)
-                        if isinstance(data, list):
-                            for item in data:
-                                if str(item.get('time', '')).startswith(target_date):
-                                    if 'id' in item: deleted_post_ids.add(str(item['id']))
-                                    if 'bid' in item: deleted_post_ids.add(str(item['bid']))
-                    except Exception: pass
-                elif file_path.endswith('.csv'):
-                    try:
-                        df = pd.read_csv(file_path, dtype=str)
-                        if 'time' in df.columns:
-                            mask = df['time'].astype(str).str.startswith(target_date)
-                            for _, row in df[mask].iterrows():
-                                if 'id' in row and pd.notna(row['id']): deleted_post_ids.add(str(row['id']))
-                                if 'bid' in row and pd.notna(row['bid']): deleted_post_ids.add(str(row['bid']))
-                    except Exception: pass
-                elif file_path.endswith('.db'):
-                    try:
-                        conn = sqlite3.connect(file_path)
-                        cursor = conn.cursor()
-                        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-                        tables = [row[0] for row in cursor.fetchall()]
-                        if 'tweets' in tables:
-                            cursor.execute("SELECT id, bid FROM tweets WHERE time LIKE ?", (f"{target_date}%",))
-                            for row in cursor.fetchall():
-                                if row[0]: deleted_post_ids.add(str(row[0]))
-                                if len(row) > 1 and row[1]: deleted_post_ids.add(str(row[1]))
-                        conn.close()
-                    except Exception: pass
+            # 快速预过滤
+            if file_path.endswith(('.json', '.csv', '.md', '.txt')):
+                try:
+                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        if target_date not in f.read():
+                            continue
+                except Exception:
+                    pass
+        
+            if file_path.endswith('.json'):
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    if isinstance(data, list):
+                        for item in data:
+                            if str(item.get('time', '')).startswith(target_date):
+                                if 'id' in item: deleted_post_ids.add(str(item['id']))
+                                if 'bid' in item: deleted_post_ids.add(str(item['bid']))
+                except Exception: pass
+            elif file_path.endswith('.csv'):
+                try:
+                    df = pd.read_csv(file_path, dtype=str)
+                    if 'time' in df.columns:
+                        mask = df['time'].astype(str).str.startswith(target_date)
+                        for _, row in df[mask].iterrows():
+                            if 'id' in row and pd.notna(row['id']): deleted_post_ids.add(str(row['id']))
+                            if 'bid' in row and pd.notna(row['bid']): deleted_post_ids.add(str(row['bid']))
+                except Exception: pass
+            elif file_path.endswith('.db'):
+                try:
+                    conn = sqlite3.connect(file_path)
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                    tables = [row[0] for row in cursor.fetchall()]
+                    if 'tweets' in tables:
+                        cursor.execute("SELECT id, bid FROM tweets WHERE time LIKE ?", (f"{target_date}%",))
+                        for row in cursor.fetchall():
+                            if row[0]: deleted_post_ids.add(str(row[0]))
+                            if len(row) > 1 and row[1]: deleted_post_ids.add(str(row[1]))
+                    conn.close()
+                except Exception: pass
 
     print(f"找到 {len(deleted_post_ids)} 个相关微博 ID，开始清理...")
     
@@ -3288,6 +3307,16 @@ def delete_local_data_by_date(target_date, target_uid=None):
             os.path.join(ud, 'comments.db'),
             os.path.join(ud, month_str, f"{target_date}.md")
         ]
+        month_dir = os.path.join(ud, month_str)
+        if os.path.exists(month_dir) and os.path.isdir(month_dir):
+            target_files.extend([
+                os.path.join(month_dir, f"posts_{month_str}.json"),
+                os.path.join(month_dir, f"posts_{month_str}.csv"),
+                os.path.join(month_dir, f"posts_{month_str}.db"),
+                os.path.join(month_dir, f"comments_{month_str}.json"),
+                os.path.join(month_dir, f"comments_{month_str}.csv"),
+                os.path.join(month_dir, f"comments_{month_str}.db")
+            ])
         for file_path in target_files:
             if not os.path.exists(file_path):
                 continue
