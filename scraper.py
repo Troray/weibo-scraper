@@ -54,6 +54,20 @@ COMMENT_FLOW = getattr(config, "COMMENT_FLOW", 0)
 # ----------------
 
 
+def safe_filename(name):
+    """
+    过滤掉 Windows/Linux/Mac 中不能用于文件名或路径的安全隐患字符，
+    防止恶意路径穿越（如 ../）或由于特殊字符导致程序越界崩溃。
+    """
+    if not name:
+        return "unknown"
+    # 替换 / \ : * ? " < > | 为下划线
+    name = re.sub(r'[\\/:*?"<>|]', '_', str(name))
+    # 防止路径穿越
+    name = name.replace("..", "_")
+    return name.strip()
+
+
 def get_user_ids(config_val):
     """
     解析配置的用户 ID，支持单个 ID、ID 列表或文本文件路径。
@@ -838,7 +852,7 @@ def scrape_and_save_user_profile(page, user_id, user_name):
     """
     获取用户的详细个人档案信息，并写入 weibo/用户名/用户id.txt 文件中。
     """
-    user_dir = os.path.join(OUTPUT_DIR, user_name)
+    user_dir = os.path.join(OUTPUT_DIR, safe_filename(user_name))
     os.makedirs(user_dir, exist_ok=True)
     file_path = os.path.join(user_dir, f"{user_id}.txt")
     
@@ -1128,7 +1142,7 @@ def load_existing_post_ids(user_name):
     从 SQLite, CSV 或 Markdown 中加载已经抓取过的微博 ID，用于增量去重判定
     """
     scraped_ids = set()
-    user_dir = os.path.join(OUTPUT_DIR, user_name)
+    user_dir = os.path.join(OUTPUT_DIR, safe_filename(user_name))
     if not os.path.exists(user_dir):
         return scraped_ids
 
@@ -1931,7 +1945,7 @@ def save_to_csv(data, user_name, target_dir=None, suffix=""):
     """
     if not data:
         return
-    csv_dir = target_dir if target_dir else os.path.join(OUTPUT_DIR, user_name)
+    csv_dir = target_dir if target_dir else os.path.join(OUTPUT_DIR, safe_filename(user_name))
     os.makedirs(csv_dir, exist_ok=True)
     csv_name = f"posts_{suffix}.csv" if suffix else "posts.csv"
     csv_path = os.path.join(csv_dir, csv_name)
@@ -2064,7 +2078,7 @@ def save_to_sqlite(data, user_name, target_dir=None, suffix=""):
     import sqlite3
     import json
     
-    db_dir = target_dir if target_dir else os.path.join(OUTPUT_DIR, user_name)
+    db_dir = target_dir if target_dir else os.path.join(OUTPUT_DIR, safe_filename(user_name))
     os.makedirs(db_dir, exist_ok=True)
     db_name = f"posts_{suffix}.db" if suffix else "posts.db"
     db_path = os.path.join(db_dir, db_name)
@@ -2237,7 +2251,7 @@ def save_to_json(data, user_name, target_dir=None, suffix=""):
         return
     import json
     
-    json_dir = target_dir if target_dir else os.path.join(OUTPUT_DIR, user_name)
+    json_dir = target_dir if target_dir else os.path.join(OUTPUT_DIR, safe_filename(user_name))
     os.makedirs(json_dir, exist_ok=True)
     json_name = f"posts_{suffix}.json" if suffix else "posts.json"
     json_path = os.path.join(json_dir, json_name)
@@ -2317,7 +2331,7 @@ def save_data(data, user_name, page=None):
     for date_str, new_posts in posts_by_date.items():
         # 构建目录结构: OUTPUT_DIR/用户名/YYYY-MM/
         month_str = date_str[:7]  # "YYYY-MM"
-        month_dir = os.path.join(OUTPUT_DIR, user_name, month_str)
+        month_dir = os.path.join(OUTPUT_DIR, safe_filename(user_name), month_str)
         
         os.makedirs(month_dir, exist_ok=True)
         
@@ -2878,7 +2892,7 @@ def save_data(data, user_name, page=None):
             except Exception as e:
                 print(f"保存文件 {file_name} 失败: {e}")
             
-    user_dir = os.path.join(OUTPUT_DIR, user_name)
+    user_dir = os.path.join(OUTPUT_DIR, safe_filename(user_name))
     if len(data) == 1:
         post_id = data[0].get("id", "未知ID")
         print(f"  -> 微博 {post_id} 数据已成功保存")
@@ -2917,7 +2931,7 @@ def save_data(data, user_name, page=None):
             posts_by_month[month_str].append(post)
             
         for month_str, month_posts in posts_by_month.items():
-            month_dir = os.path.join(OUTPUT_DIR, user_name, month_str)
+            month_dir = os.path.join(OUTPUT_DIR, safe_filename(user_name), month_str)
             os.makedirs(month_dir, exist_ok=True)
             
             if ENABLE_SAVE_CSV:
@@ -3017,9 +3031,20 @@ def delete_local_post_data(post_id, target_uid=None):
     deleted_count = {"csv": 0, "json": 0, "sqlite": 0, "md": 0}
     
     for ud in user_dirs:
-        for root, dirs, files in os.walk(ud):
-            for file in files:
-                file_path = os.path.join(root, file)
+        month_str = target_date[:7]
+        target_files = [
+            os.path.join(ud, 'posts.json'),
+            os.path.join(ud, 'posts.csv'),
+            os.path.join(ud, 'posts.db'),
+            os.path.join(ud, 'comments.json'),
+            os.path.join(ud, 'comments.csv'),
+            os.path.join(ud, 'comments.db'),
+            os.path.join(ud, month_str, f"{target_date}.md")
+        ]
+        for file_path in target_files:
+            if not os.path.exists(file_path):
+                continue
+
             
                 # 快速预过滤，极大提升删除速度
                 if file.endswith(('.json', '.csv', '.md', '.txt')):
@@ -3185,10 +3210,17 @@ def delete_local_data_by_date(target_date, target_uid=None):
     deleted_post_ids = set()
     
     # 第一遍：收集该日期的所有 post_id 和 bid
+    # 优化：采用精确定位，仅读取核心数据文件，避免海量媒体文件的遍历开销
     for ud in user_dirs:
-        for root, dirs, files in os.walk(ud):
-            for file in files:
-                file_path = os.path.join(root, file)
+        primary_files = [
+            os.path.join(ud, 'posts.json'),
+            os.path.join(ud, 'posts.csv'),
+            os.path.join(ud, 'posts.db')
+        ]
+        for file_path in primary_files:
+            if not os.path.exists(file_path):
+                continue
+
             
                 # 快速预过滤
                 if file.endswith(('.json', '.csv', '.md', '.txt')):
@@ -3235,9 +3267,20 @@ def delete_local_data_by_date(target_date, target_uid=None):
     print(f"找到 {len(deleted_post_ids)} 个相关微博 ID，开始清理...")
     
     for ud in user_dirs:
-        for root, dirs, files in os.walk(ud):
-            for file in files:
-                file_path = os.path.join(root, file)
+        month_str = target_date[:7]
+        target_files = [
+            os.path.join(ud, 'posts.json'),
+            os.path.join(ud, 'posts.csv'),
+            os.path.join(ud, 'posts.db'),
+            os.path.join(ud, 'comments.json'),
+            os.path.join(ud, 'comments.csv'),
+            os.path.join(ud, 'comments.db'),
+            os.path.join(ud, month_str, f"{target_date}.md")
+        ]
+        for file_path in target_files:
+            if not os.path.exists(file_path):
+                continue
+
             
                 # 快速预过滤
                 if file.endswith(('.json', '.csv', '.md', '.txt')):
