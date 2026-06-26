@@ -4,7 +4,7 @@ import time
 import pandas as pd
 from datetime import datetime, timedelta
 import re
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, TimeoutError
 from utils import parse_weibo_time
 
 # 解决 Windows 终端下 print 打印 Emoji 表情时的 GBK 编码报错问题
@@ -847,7 +847,7 @@ def fetch_user_name(page, user_id):
         
         # 优先通过 API 接口获取昵称
         try:
-            info_res = page.evaluate("async (url) => { const r = await fetch(url); return await r.json(); }", info_url)
+            info_res = page.context.request.get(info_url, headers=headers).json()
             if info_res.get("ok") == 1:
                 screen_name = info_res.get("data", {}).get("user", {}).get("screen_name")
                 if screen_name:
@@ -886,7 +886,8 @@ def scrape_and_save_user_profile(page, user_id, user_name):
     os.makedirs(user_dir, exist_ok=True)
     file_path = os.path.join(user_dir, f"{user_id}.txt")
     
-    if os.path.exists(file_path):
+    # 如果 user_name 是 ID，说明之前没拿到真名，必须强制拉取 API 以纠正真名，因此不能跳过
+    if str(user_name) != str(user_id) and os.path.exists(file_path):
         print(f"ℹ️ 用户 {user_name} ({user_id}) 的个人资料 {user_id}.txt 已存在，跳过重复提取下载。")
         return user_name
         
@@ -929,11 +930,11 @@ def scrape_and_save_user_profile(page, user_id, user_name):
             page.wait_for_timeout(1000) # 轻微延时确保 fetch 环境就绪
             
             # 爬取基础资料 info
-            info_res = page.evaluate("async (url) => { const r = await fetch(url); return await r.json(); }", info_url)
+            info_res = page.context.request.get(info_url, headers=headers).json()
             user_info = info_res.get("data", {}).get("user", {}) if info_res.get("ok") == 1 else {}
             
             # 爬取详细资料 detail
-            detail_res = page.evaluate("async (url) => { const r = await fetch(url); return await r.json(); }", detail_url)
+            detail_res = page.context.request.get(detail_url, headers=headers).json()
             detail_info = detail_res.get("data", {}) if detail_res.get("ok") == 1 else {}
         except Exception as e:
             print(f"❌ 页面加载获取用户 {user_name} 个人资料失败: {e}")
@@ -1098,41 +1099,45 @@ def scrape_and_save_user_profile(page, user_id, user_name):
         # 下载头像文件到本地
         if avatar_clean:
             avatar_local_path = os.path.join(user_dir, "avatar.jpg")
-            try:
-                download_file(avatar_clean, avatar_local_path, show_progress=False)
-                print(f"✅ 成功下载头像到本地: {avatar_local_path}")
-            except Exception as e:
-                print(f"⚠️ 下载用户头像失败: {e}")
+            if not os.path.exists(avatar_local_path):
+                try:
+                    download_file(avatar_clean, avatar_local_path, show_progress=False)
+                    print(f"✅ 成功下载头像到本地: {avatar_local_path}")
+                except Exception as e:
+                    print(f"⚠️ 下载用户头像失败: {e}")
         if avatar_hd_clean:
             avatar_hd_local_path = os.path.join(user_dir, "avatar_hd.jpg")
-            try:
-                download_file(avatar_hd_clean, avatar_hd_local_path, show_progress=False)
-                print(f"✅ 成功下载高清头像到本地: {avatar_hd_local_path}")
-            except Exception as e:
-                print(f"⚠️ 下载用户高清头像失败: {e}")
+            if not os.path.exists(avatar_hd_local_path):
+                try:
+                    download_file(avatar_hd_clean, avatar_hd_local_path, show_progress=False)
+                    print(f"✅ 成功下载高清头像到本地: {avatar_hd_local_path}")
+                except Exception as e:
+                    print(f"⚠️ 下载用户高清头像失败: {e}")
                 
         # 下载手机端背景图
         if cover_phone:
             cover_phone_local_path = os.path.join(user_dir, "cover_image_phone.jpg")
-            try:
-                download_file(cover_phone, cover_phone_local_path, show_progress=False)
-                print(f"✅ 成功下载手机端背景图到本地: {cover_phone_local_path}")
-            except Exception as e:
-                print(f"⚠️ 下载手机端背景图失败: {e}")
+            if not os.path.exists(cover_phone_local_path):
+                try:
+                    download_file(cover_phone, cover_phone_local_path, show_progress=False)
+                    print(f"✅ 成功下载手机端背景图到本地: {cover_phone_local_path}")
+                except Exception as e:
+                    print(f"⚠️ 下载手机端背景图失败: {e}")
                 
         # 下载网页端背景图
         if cover_web and cover_web != cover_phone:
             cover_web_local_path = os.path.join(user_dir, "cover_image_web.jpg")
-            try:
-                download_file(cover_web, cover_web_local_path, show_progress=False)
-                print(f"✅ 成功下载网页端背景图到本地: {cover_web_local_path}")
-            except Exception as e:
-                print(f"⚠️ 下载网页端背景图失败: {e}")
+            if not os.path.exists(cover_web_local_path):
+                try:
+                    download_file(cover_web, cover_web_local_path, show_progress=False)
+                    print(f"✅ 成功下载网页端背景图到本地: {cover_web_local_path}")
+                except Exception as e:
+                    print(f"⚠️ 下载网页端背景图失败: {e}")
 
-        return True
+        return user_name
     except Exception as e:
         print(f"❌ 获取用户 {user_name} 个人资料失败: {e}")
-        return False
+        return user_name
 
 def update_userid_file(file_path, user_id, username, timestamp_str):
     """
@@ -1316,6 +1321,28 @@ def scrape_weibo_search(scrape_target=None, target_uid=None):
         context = browser.new_context(storage_state=STATE_FILE)
         page = context.new_page()
 
+        # 统一全局登录有效性校验（拦截登录过期）
+        original_print("正在校验微博登录状态...")
+        try:
+            page.goto("https://weibo.com", wait_until="domcontentloaded", timeout=15000)
+            page.wait_for_timeout(2000) # 等待可能的 JS 重定向
+            if "passport.weibo.com" in page.url or "login" in page.url or "retcode=6102" in page.url:
+                original_print("\n⚠️ [bold red]检测到微博登录状态已失效！[/bold red]")
+                original_print("👉 请在弹出的 Chromium 浏览器窗口中 [bold yellow]手动扫码登录[/bold yellow]...")
+                original_print("⏳ 等待扫码中 (超时时间 5 分钟)...")
+                
+                # 阻塞等待，直到 URL 不包含 login/passport 且回到 weibo.com
+                page.wait_for_url(lambda url: "weibo.com" in url and "login" not in url and "passport" not in url, timeout=300000)
+                page.wait_for_timeout(3000) # 额外等待3秒确保 cookie 持久化
+                
+                context.storage_state(path=STATE_FILE)
+                original_print("✅ 重新登录成功！已刷新 state.json。")
+            else:
+                original_print("✅ 登录状态有效。")
+        except Exception as e:
+            original_print(f"❌ 登录状态校验异常，程序终止运行: {e}")
+            sys.exit(1)
+
         with global_dashboard:
             for user_idx, user_info in enumerate(user_ids, 1):
                 user_id = user_info["id"]
@@ -1332,8 +1359,10 @@ def scrape_weibo_search(scrape_target=None, target_uid=None):
                 page.goto(f"https://weibo.com/u/{user_id}", wait_until="domcontentloaded", timeout=15000)
                 # 等待 React 渲染出主体布局（极快），不必等待所有图片和追踪脚本加载
                 page.wait_for_selector('.woo-panel-left', timeout=5000)
-            except Exception:
-                pass
+            except TimeoutError as e:
+                logger.warning(f"页面加载超时: {e}")
+            except Exception as e:
+                logger.error(f"未能预期的页面导航错误: {e}", exc_info=True)
 
             # 获取用户详细资料并保存至 weibo/用户名/用户id.txt
             real_name = scrape_and_save_user_profile(page, user_id, user_name)
