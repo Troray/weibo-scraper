@@ -4,7 +4,7 @@ import time
 import pandas as pd
 from datetime import datetime, timedelta
 import re
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, TimeoutError
 from utils import parse_weibo_time
 
 # 解决 Windows 终端下 print 打印 Emoji 表情时的 GBK 编码报错问题
@@ -15,6 +15,36 @@ if hasattr(sys.stderr, 'reconfigure'):
 
 
 import config
+
+import builtins
+import logging
+from config import ENABLE_VERBOSE_LOGGING, ENABLE_FILE_LOGGING, LOG_FILE_PATH
+
+logger = logging.getLogger('weibo_scraper')
+logger.setLevel(logging.INFO)
+
+if getattr(config, 'ENABLE_FILE_LOGGING', 1):
+    file_handler = logging.FileHandler(LOG_FILE_PATH, encoding='utf-8')
+    file_formatter = logging.Formatter('%(asctime)s - %(message)s')
+    file_handler.setFormatter(file_formatter)
+    logger.addHandler(file_handler)
+
+original_print = builtins.print
+
+def verbose_print(*args, **kwargs):
+    msg = " ".join(str(a) for a in args)
+    logger.info(msg)
+    if ENABLE_VERBOSE_LOGGING:
+        original_print(*args, **kwargs)
+    elif msg.startswith('错误:') or msg.startswith('[提示]') or '删除' in msg or '清理完成' in msg or '扫描' in msg or '找到' in msg or '跳过' in msg:
+        original_print(*args, **kwargs)
+
+builtins.print = verbose_print
+
+from rich.console import Console
+from rich.status import Status
+global_console = Console()
+global_dashboard = Status("[bold cyan]准备开始抓取...[/bold cyan]", console=global_console)
 
 # --- 映射统一配置文件 config.py 中的设置 ---
 TARGET_USER_IDS = config.TARGET_USER_IDS
@@ -52,6 +82,20 @@ COMMENT_PAGE_DELAY = getattr(config, "COMMENT_PAGE_DELAY", 0.3)
 REPLY_PAGE_DELAY = getattr(config, "REPLY_PAGE_DELAY", 0.15)
 COMMENT_FLOW = getattr(config, "COMMENT_FLOW", 0)
 # ----------------
+
+
+def safe_filename(name):
+    """
+    过滤掉 Windows/Linux/Mac 中不能用于文件名或路径的安全隐患字符，
+    防止恶意路径穿越（如 ../）或由于特殊字符导致程序越界崩溃。
+    """
+    if not name:
+        return "unknown"
+    # 替换 / \ : * ? " < > | 为下划线
+    name = re.sub(r'[\\/:*?"<>|]', '_', str(name))
+    # 防止路径穿越
+    name = name.replace("..", "_")
+    return name.strip()
 
 
 def get_user_ids(config_val):
@@ -151,11 +195,11 @@ def parse_weibo_stats(stats_text):
             try:
                 val = float(num_str.replace('万', '').strip())
                 return int(val * 10000)
-            except:
+            except Exception:
                 return 0
         try:
             return int(num_str)
-        except:
+        except Exception:
             return 0
 
     # 检查是否是纯数字和空格（例如旧格式的 stats_raw "17 342 1621"）
@@ -216,7 +260,7 @@ def download_file(url, save_path, page=None, show_progress=True):
         if not show_progress:
             return
         if total <= 0:
-            sys.stdout.write(f"\r正在下载: {downloaded / 1024 / 1024:.2f} MB...")
+            pass
         else:
             percent = (downloaded / total) * 100
             bar_length = 30
@@ -803,7 +847,7 @@ def fetch_user_name(page, user_id):
         
         # 优先通过 API 接口获取昵称
         try:
-            info_res = page.evaluate("async (url) => { const r = await fetch(url); return await r.json(); }", info_url)
+            info_res = page.context.request.get(info_url, headers=headers).json()
             if info_res.get("ok") == 1:
                 screen_name = info_res.get("data", {}).get("user", {}).get("screen_name")
                 if screen_name:
@@ -838,13 +882,14 @@ def scrape_and_save_user_profile(page, user_id, user_name):
     """
     获取用户的详细个人档案信息，并写入 weibo/用户名/用户id.txt 文件中。
     """
-    user_dir = os.path.join(OUTPUT_DIR, user_name)
+    user_dir = os.path.join(OUTPUT_DIR, safe_filename(user_name))
     os.makedirs(user_dir, exist_ok=True)
     file_path = os.path.join(user_dir, f"{user_id}.txt")
     
-    if os.path.exists(file_path):
+    # 如果 user_name 是 ID，说明之前没拿到真名，必须强制拉取 API 以纠正真名，因此不能跳过
+    if str(user_name) != str(user_id) and os.path.exists(file_path):
         print(f"ℹ️ 用户 {user_name} ({user_id}) 的个人资料 {user_id}.txt 已存在，跳过重复提取下载。")
-        return True
+        return user_name
         
     print(f"正在获取用户 {user_name} ({user_id}) 的详细个人信息...")
     
@@ -885,11 +930,11 @@ def scrape_and_save_user_profile(page, user_id, user_name):
             page.wait_for_timeout(1000) # 轻微延时确保 fetch 环境就绪
             
             # 爬取基础资料 info
-            info_res = page.evaluate("async (url) => { const r = await fetch(url); return await r.json(); }", info_url)
+            info_res = page.context.request.get(info_url, headers=headers).json()
             user_info = info_res.get("data", {}).get("user", {}) if info_res.get("ok") == 1 else {}
             
             # 爬取详细资料 detail
-            detail_res = page.evaluate("async (url) => { const r = await fetch(url); return await r.json(); }", detail_url)
+            detail_res = page.context.request.get(detail_url, headers=headers).json()
             detail_info = detail_res.get("data", {}) if detail_res.get("ok") == 1 else {}
         except Exception as e:
             print(f"❌ 页面加载获取用户 {user_name} 个人资料失败: {e}")
@@ -898,7 +943,15 @@ def scrape_and_save_user_profile(page, user_id, user_name):
     try:
         if not user_info and not detail_info:
             print(f"⚠️ 无法通过 API 接口获取用户 {user_id} 的资料")
-            return False
+            return user_name
+            
+        # 如果 API 获取到了昵称，且原本传递进来的是用户 ID，则修正 user_name
+        if str(user_name) == str(user_id) and user_info.get("screen_name"):
+            user_name = str(user_info.get("screen_name")).strip()
+            # 重新构建正确的目录
+            user_dir = os.path.join(OUTPUT_DIR, safe_filename(user_name))
+            os.makedirs(user_dir, exist_ok=True)
+            file_path = os.path.join(user_dir, f"{user_id}.txt")
             
         # 性别映射
         gender_raw = user_info.get("gender", "")
@@ -1046,41 +1099,45 @@ def scrape_and_save_user_profile(page, user_id, user_name):
         # 下载头像文件到本地
         if avatar_clean:
             avatar_local_path = os.path.join(user_dir, "avatar.jpg")
-            try:
-                download_file(avatar_clean, avatar_local_path, show_progress=False)
-                print(f"✅ 成功下载头像到本地: {avatar_local_path}")
-            except Exception as e:
-                print(f"⚠️ 下载用户头像失败: {e}")
+            if not os.path.exists(avatar_local_path):
+                try:
+                    download_file(avatar_clean, avatar_local_path, show_progress=False)
+                    print(f"✅ 成功下载头像到本地: {avatar_local_path}")
+                except Exception as e:
+                    print(f"⚠️ 下载用户头像失败: {e}")
         if avatar_hd_clean:
             avatar_hd_local_path = os.path.join(user_dir, "avatar_hd.jpg")
-            try:
-                download_file(avatar_hd_clean, avatar_hd_local_path, show_progress=False)
-                print(f"✅ 成功下载高清头像到本地: {avatar_hd_local_path}")
-            except Exception as e:
-                print(f"⚠️ 下载用户高清头像失败: {e}")
+            if not os.path.exists(avatar_hd_local_path):
+                try:
+                    download_file(avatar_hd_clean, avatar_hd_local_path, show_progress=False)
+                    print(f"✅ 成功下载高清头像到本地: {avatar_hd_local_path}")
+                except Exception as e:
+                    print(f"⚠️ 下载用户高清头像失败: {e}")
                 
         # 下载手机端背景图
         if cover_phone:
             cover_phone_local_path = os.path.join(user_dir, "cover_image_phone.jpg")
-            try:
-                download_file(cover_phone, cover_phone_local_path, show_progress=False)
-                print(f"✅ 成功下载手机端背景图到本地: {cover_phone_local_path}")
-            except Exception as e:
-                print(f"⚠️ 下载手机端背景图失败: {e}")
+            if not os.path.exists(cover_phone_local_path):
+                try:
+                    download_file(cover_phone, cover_phone_local_path, show_progress=False)
+                    print(f"✅ 成功下载手机端背景图到本地: {cover_phone_local_path}")
+                except Exception as e:
+                    print(f"⚠️ 下载手机端背景图失败: {e}")
                 
         # 下载网页端背景图
         if cover_web and cover_web != cover_phone:
             cover_web_local_path = os.path.join(user_dir, "cover_image_web.jpg")
-            try:
-                download_file(cover_web, cover_web_local_path, show_progress=False)
-                print(f"✅ 成功下载网页端背景图到本地: {cover_web_local_path}")
-            except Exception as e:
-                print(f"⚠️ 下载网页端背景图失败: {e}")
+            if not os.path.exists(cover_web_local_path):
+                try:
+                    download_file(cover_web, cover_web_local_path, show_progress=False)
+                    print(f"✅ 成功下载网页端背景图到本地: {cover_web_local_path}")
+                except Exception as e:
+                    print(f"⚠️ 下载网页端背景图失败: {e}")
 
-        return True
+        return user_name
     except Exception as e:
         print(f"❌ 获取用户 {user_name} 个人资料失败: {e}")
-        return False
+        return user_name
 
 def update_userid_file(file_path, user_id, username, timestamp_str):
     """
@@ -1128,7 +1185,7 @@ def load_existing_post_ids(user_name):
     从 SQLite, CSV 或 Markdown 中加载已经抓取过的微博 ID，用于增量去重判定
     """
     scraped_ids = set()
-    user_dir = os.path.join(OUTPUT_DIR, user_name)
+    user_dir = os.path.join(OUTPUT_DIR, safe_filename(user_name))
     if not os.path.exists(user_dir):
         return scraped_ids
 
@@ -1205,13 +1262,14 @@ def load_existing_post_ids(user_name):
 
 
 def scrape_weibo_search(scrape_target=None, target_uid=None):
-    global START_DATE, END_DATE
+    local_start_date = START_DATE
+    local_end_date = END_DATE
     target_mid = None
     target_bid = None
     if scrape_target:
         if re.match(r'^\d{4}-\d{2}-\d{2}$', scrape_target):
-            START_DATE = scrape_target
-            END_DATE = scrape_target
+            local_start_date = scrape_target
+            local_end_date = scrape_target
         elif re.match(r'^\d{2}-\d{2}$', scrape_target):
             print("错误: 不支持仅输入 MM-DD 格式的日期，请使用完整的 YYYY-MM-DD 格式。")
             sys.exit(1)
@@ -1263,25 +1321,55 @@ def scrape_weibo_search(scrape_target=None, target_uid=None):
         context = browser.new_context(storage_state=STATE_FILE)
         page = context.new_page()
 
-        for user_idx, user_info in enumerate(user_ids, 1):
-            user_id = user_info["id"]
-            print(f"\n==========================================")
-            print(f"开始抓取第 {user_idx}/{len(user_ids)} 个用户 ID: {user_id}")
-            print(f"==========================================")
+        # 统一全局登录有效性校验（拦截登录过期）
+        original_print("正在校验微博登录状态...")
+        try:
+            page.goto("https://weibo.com", wait_until="domcontentloaded", timeout=15000)
+            page.wait_for_timeout(2000) # 等待可能的 JS 重定向
+            if "passport.weibo.com" in page.url or "login" in page.url or "retcode=6102" in page.url:
+                original_print("\n⚠️ [bold red]检测到微博登录状态已失效！[/bold red]")
+                original_print("👉 请在弹出的 Chromium 浏览器窗口中 [bold yellow]手动扫码登录[/bold yellow]...")
+                original_print("⏳ 等待扫码中 (超时时间 5 分钟)...")
+                
+                # 阻塞等待，直到 URL 不包含 login/passport 且回到 weibo.com
+                page.wait_for_url(lambda url: "weibo.com" in url and "login" not in url and "passport" not in url, timeout=300000)
+                page.wait_for_timeout(3000) # 额外等待3秒确保 cookie 持久化
+                
+                context.storage_state(path=STATE_FILE)
+                original_print("✅ 重新登录成功！已刷新 state.json。")
+            else:
+                original_print("✅ 登录状态有效。")
+        except Exception as e:
+            original_print(f"❌ 登录状态校验异常，程序终止运行: {e}")
+            sys.exit(1)
 
-            # 自动获取用户昵称
-            user_name = fetch_user_name(page, user_id)
-            
-            print(f"打开用户 {user_name} ({user_id}) 主页...")
+        with global_dashboard:
+            for user_idx, user_info in enumerate(user_ids, 1):
+                user_id = user_info["id"]
+                original_print(f"\n==========================================")
+                original_print(f"开始抓取第 {user_idx}/{len(user_ids)} 个用户 ID: {user_id}")
+                original_print(f"==========================================")
+
+                # 自动获取用户昵称
+                user_name = fetch_user_name(page, user_id)
+                global_dashboard.update(f"[bold cyan]正在抓取第 {user_idx}/{len(user_ids)} 个用户: {user_name} ({user_id}) | 进度: 初始化...[/bold cyan]")
+                
+                original_print(f"打开用户 {user_name} ({user_id}) 主页...")
             try:
                 page.goto(f"https://weibo.com/u/{user_id}", wait_until="domcontentloaded", timeout=15000)
                 # 等待 React 渲染出主体布局（极快），不必等待所有图片和追踪脚本加载
                 page.wait_for_selector('.woo-panel-left', timeout=5000)
-            except Exception:
-                pass
+            except TimeoutError as e:
+                logger.warning(f"页面加载超时: {e}")
+            except Exception as e:
+                logger.error(f"未能预期的页面导航错误: {e}", exc_info=True)
 
             # 获取用户详细资料并保存至 weibo/用户名/用户id.txt
-            scrape_and_save_user_profile(page, user_id, user_name)
+            real_name = scrape_and_save_user_profile(page, user_id, user_name)
+            if real_name and str(real_name) != str(user_name):
+                user_name = real_name
+                # 更新面板上的名字
+                global_dashboard.update(f"[bold cyan]正在抓取第 {user_idx}/{len(user_ids)} 个用户: {user_name} ({user_id}) | 进度: 初始化...[/bold cyan]")
             
             # 加载已存在的微博 ID 进行增量去重判定
             scraped_ids = load_existing_post_ids(user_name)
@@ -1295,16 +1383,16 @@ def scrape_weibo_search(scrape_target=None, target_uid=None):
                 user_start_dt = user_info["start_time"]
                 user_start_date_str = user_start_dt.strftime("%Y-%m-%d")
             else:
-                if START_DATE:
-                    user_start_dt = datetime.strptime(START_DATE, "%Y-%m-%d")
-                    user_start_date_str = START_DATE
+                if local_start_date:
+                    user_start_dt = datetime.strptime(local_start_date, "%Y-%m-%d")
+                    user_start_date_str = local_start_date
                 else:
                     user_start_dt = run_start_time
                     user_start_date_str = run_start_time.strftime("%Y-%m-%d")
             
-            if END_DATE:
-                user_end_dt = datetime.strptime(END_DATE, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
-                user_end_date_str = END_DATE
+            if local_end_date:
+                user_end_dt = datetime.strptime(local_end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+                user_end_date_str = local_end_date
             else:
                 user_end_dt = run_start_time
                 user_end_date_str = run_start_time.strftime("%Y-%m-%d")
@@ -1320,10 +1408,14 @@ def scrape_weibo_search(scrape_target=None, target_uid=None):
             processed_ids = set() # 用于去重
 
             for start_str, end_str in user_date_ranges:
+                initial_scraped_count = scraped_count
                 if start_str == "SINGLE_POST":
                     print(f"\n=== 用户 {user_name} ({user_id}) | 开始抓取指定微博 ===")
                 else:
                     print(f"\n=== 用户 {user_name} ({user_id}) | 开始抓取时间段: {start_str} 至 {end_str} ===")
+                
+                date_info = f"指定微博 ID: {scrape_target}" if start_str == "SINGLE_POST" else (f"日期: {start_str}" if start_str == end_str else f"日期: {start_str} 至 {end_str}")
+                global_dashboard.update(f"[bold cyan]正在抓取第 {user_idx}/{len(user_ids)} 个用户: {user_name} ({user_id}) | {date_info} | 进度: {scraped_count} 条已保存...[/bold cyan]")
                 
                 # 结束日期（在 ID 去重模式下，可直接使用 end_str，不再需要增加 1 天）
                 search_end_str = end_str
@@ -1388,7 +1480,7 @@ def scrape_weibo_search(scrape_target=None, target_uid=None):
                 while True:
                     try:
                         page.wait_for_load_state("domcontentloaded", timeout=30000)
-                    except:
+                    except Exception:
                         print("页面加载超时，尝试继续...")
 
                     # 检查是否有结果
@@ -1532,11 +1624,11 @@ def scrape_weibo_search(scrape_target=None, target_uid=None):
 
                             # --- 去重与时间过滤 ---
                             if post_id in processed_ids:
-                                print(f"  -> 跳过本次已处理的重复微博: {post_id}")
+                                print(f"  ⏭️ 跳过本次已处理的重复微博: {post_id}")
                                 continue
                                 
                             if post_id in scraped_ids:
-                                print(f"  -> 跳过历史已抓取的重复微博: {post_id}")
+                                print(f"  ⏭️ 跳过历史已抓取的重复微博: {post_id}")
                                 continue
                                 
                             # 严格时间范围过滤 (单篇抓取时忽略时间过滤)
@@ -1561,7 +1653,7 @@ def scrape_weibo_search(scrape_target=None, target_uid=None):
                                 try:
                                     expand_btn.evaluate("el => el.click()")
                                     page.wait_for_timeout(500)
-                                except:
+                                except Exception:
                                     pass
                             
                             # 4. 提取正文
@@ -1639,7 +1731,7 @@ def scrape_weibo_search(scrape_target=None, target_uid=None):
                                     if not retweet_content:
                                         try:
                                             retweet_content = retweet_box.locator("p.txt").first.evaluate(js_preserve_emojis).strip()
-                                        except:
+                                        except Exception:
                                             pass
                                             
                                     # 清理转发微博正文末尾多余的“收起d”、“展开c”等字符
@@ -1815,8 +1907,14 @@ def scrape_weibo_search(scrape_target=None, target_uid=None):
                                 "retweet_ip_location": retweet_ip_location
                             }
                             try:
-                                save_data([post_data], user_name, page)
+                                global_dashboard.stop()
+                                try:
+                                    save_data([post_data], user_name, page)
+                                finally:
+                                    global_dashboard.start()
                                 scraped_count += 1
+                                date_info = f"指定微博 ID: {scrape_target}" if start_str == "SINGLE_POST" else (f"日期: {start_str}" if start_str == end_str else f"日期: {start_str} 至 {end_str}")
+                                global_dashboard.update(f"[bold cyan]正在抓取第 {user_idx}/{len(user_ids)} 个用户: {user_name} ({user_id}) | {date_info} | 进度: {scraped_count} 条已保存...[/bold cyan]")
                                 scraped_ids.add(post_id)
                                 processed_ids.add(post_id)
                             except Exception as save_err:
@@ -1843,9 +1941,15 @@ def scrape_weibo_search(scrape_target=None, target_uid=None):
                         print("已到达最后一页。")
                         break
                 
+                day_saved = scraped_count - initial_scraped_count
+                if start_str != "SINGLE_POST":
+                    global_dashboard.stop()
+                    global_console.print(f"  [green]✅ {start_str} 共保存了 {day_saved} 条新微博[/green]")
+                    global_dashboard.start()
+                
                 time.sleep(3)
 
-            print(f"\n✅ 用户 {user_name} 抓取完毕，本次共新抓取并保存了 {scraped_count} 条微博。")
+            original_print(f"\n✅ 用户 {user_name} 抓取完毕，本次共新抓取并保存了 {scraped_count} 条微博。")
 
             # 该用户完全抓取成功后，更新对应文件的增量时间戳 (单篇/单日指定时不要更新)
             if TARGET_USER_IDS.endswith(".txt") and not scrape_target:
@@ -1855,7 +1959,7 @@ def scrape_weibo_search(scrape_target=None, target_uid=None):
 
         try:
             headless_browser.close()
-        except:
+        except Exception:
             pass
 
 
@@ -1874,16 +1978,22 @@ def parse_markdown_posts(file_path):
         print(f"⚠️ 读取 Markdown 文件失败: {e}")
         return []
 
-    # 按 "\n## " 分割各条微博
-    parts = content.split("\n## ")
+    # 使用强正则按 \n## HH:MM:SS 分割各条微博，防止被用户正文中的 `## ` 截断
+    parts = re.split(r'\n## (?=\d{2}:\d{2}:\d{2})', content)
     if len(parts) <= 1:
-        parts = content.split("## ")
+        # 如果第一条就在文件头部，可能没有前导的 \n
+        parts = re.split(r'^## (?=\d{2}:\d{2}:\d{2})', content, flags=re.MULTILINE)
         if len(parts) <= 1:
             return []
 
     posts = []
     start_idx = 1
-    if parts[0].startswith("## "):
+    # 如果用 MULTILINE 切分，或者文件开头恰好满足，第一部分可能是空字符串或者无关的头信息
+    # 只要 parts[0] 是空字符串且有后续部分，我们也可以跳过 parts[0]
+    if parts[0].strip() == "":
+        start_idx = 1
+    # 原本的兼容性处理，以防意外
+    elif parts[0].startswith("## "):
         start_idx = 0
         parts[0] = parts[0][3:]
 
@@ -1924,7 +2034,7 @@ def save_to_csv(data, user_name, target_dir=None, suffix=""):
     """
     if not data:
         return
-    csv_dir = target_dir if target_dir else os.path.join(OUTPUT_DIR, user_name)
+    csv_dir = target_dir if target_dir else os.path.join(OUTPUT_DIR, safe_filename(user_name))
     os.makedirs(csv_dir, exist_ok=True)
     csv_name = f"posts_{suffix}.csv" if suffix else "posts.csv"
     csv_path = os.path.join(csv_dir, csv_name)
@@ -1962,27 +2072,13 @@ def save_to_csv(data, user_name, target_dir=None, suffix=""):
     
     if os.path.exists(csv_path):
         try:
-            df_old = pd.read_csv(csv_path, dtype={"id": str})
-            df_old["id"] = df_old["id"].astype(str)
-            # Ensure old columns exist
-            for col in [
-                "device", "ip_location", "retweet_user", "retweet_content", "retweet_images",
-                "retweet_videos", "retweet_livephotos", "retweet_time", "retweet_link",
-                "retweet_id", "retweet_device", "retweet_ip_location"
-            ]:
-                if col not in df_old.columns:
-                    df_old[col] = ""
-            df_combined = pd.concat([df_new, df_old]).drop_duplicates(subset=["id"], keep="first")
-            df_combined = df_combined.sort_values(by="time", ascending=True)
-            df_combined.to_csv(csv_path, index=False, encoding="utf-8-sig")
-            # print("CSV updated.")
+            # 采用 O(1) 追加写入，不再全量读写合并，极大提升写入性能
+            df_new.to_csv(csv_path, mode='a', header=False, index=False, encoding="utf-8-sig")
         except Exception as e:
-            print(f"  -> ⚠️ 合并历史 CSV 归档失败: {e}，正在尝试重写...")
+            print(f"  -> ⚠️ 追加写入 CSV 归档失败: {e}，将尝试重写...")
             df_new.to_csv(csv_path, index=False, encoding="utf-8-sig")
-            # print("CSV written.")
     else:
         df_new.to_csv(csv_path, index=False, encoding="utf-8-sig")
-        # print("CSV written.")
         
     # Comments CSV
     if ENABLE_SCRAPE_COMMENTS:
@@ -2031,18 +2127,10 @@ def save_to_csv(data, user_name, target_dir=None, suffix=""):
             df_comments_new = pd.DataFrame(comments_data)
             if os.path.exists(comments_csv_path):
                 try:
-                    df_comments_old = pd.read_csv(comments_csv_path, dtype={"id": str, "post_id": str, "parent_id": str, "user_id": str})
-                    df_comments_old["id"] = df_comments_old["id"].astype(str)
-                    if "source" not in df_comments_old.columns:
-                        df_comments_old["source"] = ""
-                    df_comments_combined = pd.concat([df_comments_new, df_comments_old]).drop_duplicates(subset=["id"], keep="first")
-                    df_comments_combined = df_comments_combined.sort_values(by="time", ascending=True)
-                    df_comments_combined.to_csv(comments_csv_path, index=False, encoding="utf-8-sig")
-                    # print("Comments CSV updated.")
+                    df_comments_new.to_csv(comments_csv_path, mode='a', header=False, index=False, encoding="utf-8-sig")
                 except Exception as e:
-                    print(f"  -> ⚠️ 合并历史评论 CSV 失败: {e}，正在尝试重写...")
+                    print(f"  -> ⚠️ 追加写入评论 CSV 失败: {e}，将尝试重写...")
                     df_comments_new.to_csv(comments_csv_path, index=False, encoding="utf-8-sig")
-                    # print("Comments CSV written.")
             else:
                 df_comments_new.to_csv(comments_csv_path, index=False, encoding="utf-8-sig")
                 # print("Comments CSV written.")
@@ -2057,7 +2145,7 @@ def save_to_sqlite(data, user_name, target_dir=None, suffix=""):
     import sqlite3
     import json
     
-    db_dir = target_dir if target_dir else os.path.join(OUTPUT_DIR, user_name)
+    db_dir = target_dir if target_dir else os.path.join(OUTPUT_DIR, safe_filename(user_name))
     os.makedirs(db_dir, exist_ok=True)
     db_name = f"posts_{suffix}.db" if suffix else "posts.db"
     db_path = os.path.join(db_dir, db_name)
@@ -2217,7 +2305,7 @@ def save_to_sqlite(data, user_name, target_dir=None, suffix=""):
                             reply.get("source", "")
                         ))
         
-    conn.commit()
+        conn.commit()
     conn.close()
     # print(f"SQLite synced: {db_path}")
 
@@ -2230,7 +2318,7 @@ def save_to_json(data, user_name, target_dir=None, suffix=""):
         return
     import json
     
-    json_dir = target_dir if target_dir else os.path.join(OUTPUT_DIR, user_name)
+    json_dir = target_dir if target_dir else os.path.join(OUTPUT_DIR, safe_filename(user_name))
     os.makedirs(json_dir, exist_ok=True)
     json_name = f"posts_{suffix}.json" if suffix else "posts.json"
     json_path = os.path.join(json_dir, json_name)
@@ -2270,32 +2358,65 @@ def save_to_json(data, user_name, target_dir=None, suffix=""):
             
         new_json_data.append(post_item)
         
-    if os.path.exists(json_path):
-        try:
-            with open(json_path, "r", encoding="utf-8") as f:
-                old_json_data = json.load(f)
-            
-            combined_dict = {str(item["id"]): item for item in old_json_data}
-            for item in new_json_data:
-                combined_dict[str(item["id"])] = item
-                
-            merged_list = list(combined_dict.values())
-            merged_list.sort(key=lambda x: x.get("time", ""))
-            
-            with open(json_path, "w", encoding="utf-8") as f:
-                json.dump(merged_list, f, ensure_ascii=False, indent=2)
-            # print("JSON updated.")
-            return
-        except Exception as e:
-            print(f"  -> ⚠️ 合并历史 JSON 失败: {e}，正在尝试重写...")
-            
+    # 采用 O(1) 尾部追加逻辑，避免随着数据量增长导致重复全量读写的 I/O 灾难
     new_json_data.sort(key=lambda x: x.get("time", ""))
+    
+    if not os.path.exists(json_path):
+        try:
+            with open(json_path, "w", encoding="utf-8") as f:
+                json.dump(new_json_data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"  -> ❌ 保存 JSON 失败: {e}")
+        return
+
     try:
-        with open(json_path, "w", encoding="utf-8") as f:
-            json.dump(new_json_data, f, ensure_ascii=False, indent=2)
-        # print("JSON written.")
+        with open(json_path, "r+", encoding="utf-8") as f:
+            f.seek(0, os.SEEK_END)
+            pos = f.tell()
+            found = False
+            while pos > 0:
+                pos -= 1
+                f.seek(pos, os.SEEK_SET)
+                if f.read(1) == ']':
+                    found = True
+                    break
+            
+            if found:
+                f.seek(0)
+                file_content = f.read(pos).strip()
+                is_empty = file_content.endswith('[')
+                
+                f.seek(pos, os.SEEK_SET)
+                new_json_str = json.dumps(new_json_data, ensure_ascii=False, indent=2)
+                new_json_str = new_json_str.strip()
+                if new_json_str.startswith('['):
+                    new_json_str = new_json_str[1:]
+                if new_json_str.endswith(']'):
+                    new_json_str = new_json_str[:-1]
+                new_json_str = new_json_str.strip()
+                
+                if new_json_str:
+                    if not is_empty:
+                        f.write(',\n  ')
+                    else:
+                        f.write('\n  ')
+                    f.write(new_json_str)
+                    f.write('\n]')
+                f.truncate()
+            else:
+                # 兼容处理：文件损坏或非数组格式时，退化为全量覆盖
+                f.seek(0)
+                try:
+                    old_data = json.load(f)
+                except:
+                    old_data = []
+                if isinstance(old_data, list):
+                    old_data.extend(new_json_data)
+                f.seek(0)
+                f.truncate()
+                json.dump(old_data, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        print(f"  -> ❌ 保存 JSON 失败: {e}")
+        print(f"  -> ⚠️ O(1) 追加 JSON 失败: {e}")
 
 
 def save_data(data, user_name, page=None):
@@ -2310,7 +2431,7 @@ def save_data(data, user_name, page=None):
     for date_str, new_posts in posts_by_date.items():
         # 构建目录结构: OUTPUT_DIR/用户名/YYYY-MM/
         month_str = date_str[:7]  # "YYYY-MM"
-        month_dir = os.path.join(OUTPUT_DIR, user_name, month_str)
+        month_dir = os.path.join(OUTPUT_DIR, safe_filename(user_name), month_str)
         
         os.makedirs(month_dir, exist_ok=True)
         
@@ -2427,42 +2548,27 @@ def save_data(data, user_name, page=None):
                         local_image_paths[idx] = local_path
                 
                 if tasks:
-                    import threading
                     from concurrent.futures import ThreadPoolExecutor
+                    from rich.progress import Progress, SpinnerColumn, TextColumn
                     max_workers = DOWNLOAD_NUM_CONCURRENT_MEDIA
-                    spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
-                    spinner_state = {"done": 0, "total": len(tasks), "running": True}
-                    spinner_lock = threading.Lock()
                     
-                    def spinner_thread():
-                        idx = 0
-                        while spinner_state["running"]:
-                            with spinner_lock:
-                                done = spinner_state["done"]
-                                total = spinner_state["total"]
-                            sys.stdout.write(f"\r  正在下载图片 {spinner_chars[idx % len(spinner_chars)]} ({done}/{total})")
-                            sys.stdout.flush()
-                            idx += 1
-                            time.sleep(0.1)
-                    
-                    st = threading.Thread(target=spinner_thread, daemon=True)
-                    st.start()
-                    
-                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                        def worker(task):
-                            success = download_file(task["url"], task["save_path"], page, show_progress=False)
-                            return task, success
-                        
-                        for task, success in executor.map(worker, tasks):
-                            if success:
-                                local_image_paths[task["idx"]] = task["local_path"]
-                            with spinner_lock:
-                                spinner_state["done"] += 1
-                    
-                    spinner_state["running"] = False
-                    st.join(timeout=1)
-                    total = spinner_state["total"]
-                    sys.stdout.write(f"\r  正在下载图片 ✅ ({total}/{total})\n")
+                    with Progress(
+                        SpinnerColumn(spinner_name="dots"),
+                        TextColumn("[progress.description]{task.description} ({task.completed}/{task.total})"),
+                        transient=True
+                    ) as progress:
+                        task_id = progress.add_task("", visible=False, total=len(tasks))
+                        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                            def worker(task):
+                                success = download_file(task["url"], task["save_path"], page, show_progress=False)
+                                return task, success
+                            
+                            for task, success in executor.map(worker, tasks):
+                                if success:
+                                    local_image_paths[task["idx"]] = task["local_path"]
+                                progress.advance(task_id)
+                                
+                    pass
                     sys.stdout.flush()
                                 
                 local_image_paths = [p for p in local_image_paths if p is not None]
@@ -2497,42 +2603,27 @@ def save_data(data, user_name, page=None):
                         local_video_paths[idx] = local_path
                 
                 if tasks:
-                    import threading
                     from concurrent.futures import ThreadPoolExecutor
+                    from rich.progress import Progress, SpinnerColumn, TextColumn
                     max_workers = DOWNLOAD_NUM_CONCURRENT_MEDIA
-                    spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
-                    spinner_state = {"done": 0, "total": len(tasks), "running": True}
-                    spinner_lock = threading.Lock()
                     
-                    def spinner_thread():
-                        idx = 0
-                        while spinner_state["running"]:
-                            with spinner_lock:
-                                done = spinner_state["done"]
-                                total = spinner_state["total"]
-                            sys.stdout.write(f"\r  正在下载视频 {spinner_chars[idx % len(spinner_chars)]} ({done}/{total})")
-                            sys.stdout.flush()
-                            idx += 1
-                            time.sleep(0.1)
-                    
-                    st = threading.Thread(target=spinner_thread, daemon=True)
-                    st.start()
-                    
-                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                        def worker(task):
-                            success = download_file(task["url"], task["save_path"], page, show_progress=False)
-                            return task, success
-                        
-                        for task, success in executor.map(worker, tasks):
-                            if success:
-                                local_video_paths[task["idx"]] = task["local_path"]
-                            with spinner_lock:
-                                spinner_state["done"] += 1
-                    
-                    spinner_state["running"] = False
-                    st.join(timeout=1)
-                    total = spinner_state["total"]
-                    sys.stdout.write(f"\r  正在下载视频 ✅ ({total}/{total})\n")
+                    with Progress(
+                        SpinnerColumn(spinner_name="dots"),
+                        TextColumn("[progress.description]{task.description} ({task.completed}/{task.total})"),
+                        transient=True
+                    ) as progress:
+                        task_id = progress.add_task("", visible=False, total=len(tasks))
+                        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                            def worker(task):
+                                success = download_file(task["url"], task["save_path"], page, show_progress=False)
+                                return task, success
+                            
+                            for task, success in executor.map(worker, tasks):
+                                if success:
+                                    local_video_paths[task["idx"]] = task["local_path"]
+                                progress.advance(task_id)
+                                
+                    pass
                     sys.stdout.flush()
                                 
                 local_video_paths = [p for p in local_video_paths if p is not None]
@@ -2565,42 +2656,27 @@ def save_data(data, user_name, page=None):
                         local_livephoto_paths[idx] = local_path
                         
                 if tasks:
-                    import threading
                     from concurrent.futures import ThreadPoolExecutor
+                    from rich.progress import Progress, SpinnerColumn, TextColumn
                     max_workers = DOWNLOAD_NUM_CONCURRENT_MEDIA
-                    spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
-                    spinner_state = {"done": 0, "total": len(tasks), "running": True}
-                    spinner_lock = threading.Lock()
                     
-                    def spinner_thread():
-                        idx = 0
-                        while spinner_state["running"]:
-                            with spinner_lock:
-                                done = spinner_state["done"]
-                                total = spinner_state["total"]
-                            sys.stdout.write(f"\r  正在下载实况照片 {spinner_chars[idx % len(spinner_chars)]} ({done}/{total})")
-                            sys.stdout.flush()
-                            idx += 1
-                            time.sleep(0.1)
-                    
-                    st = threading.Thread(target=spinner_thread, daemon=True)
-                    st.start()
-                    
-                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                        def worker(task):
-                            success = download_file(task["url"], task["save_path"], page, show_progress=False)
-                            return task, success
-                        
-                        for task, success in executor.map(worker, tasks):
-                            if success:
-                                local_livephoto_paths[task["idx"]] = task["local_path"]
-                            with spinner_lock:
-                                spinner_state["done"] += 1
-                    
-                    spinner_state["running"] = False
-                    st.join(timeout=1)
-                    total = spinner_state["total"]
-                    sys.stdout.write(f"\r  正在下载实况照片 ✅ ({total}/{total})\n")
+                    with Progress(
+                        SpinnerColumn(spinner_name="dots"),
+                        TextColumn("[progress.description]{task.description} ({task.completed}/{task.total})"),
+                        transient=True
+                    ) as progress:
+                        task_id = progress.add_task("", visible=False, total=len(tasks))
+                        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                            def worker(task):
+                                success = download_file(task["url"], task["save_path"], page, show_progress=False)
+                                return task, success
+                            
+                            for task, success in executor.map(worker, tasks):
+                                if success:
+                                    local_livephoto_paths[task["idx"]] = task["local_path"]
+                                progress.advance(task_id)
+                                
+                    pass
                     sys.stdout.flush()
                                 
                 local_livephoto_paths = [p for p in local_livephoto_paths if p is not None]
@@ -2647,7 +2723,7 @@ def save_data(data, user_name, page=None):
                     prefix2 = f"@{rt_user}" if not rt_user.startswith("@") else rt_user
                     for prefix in (prefix2, prefix1):
                         if rt_content.startswith(prefix):
-                            rt_content = rt_content.replace(prefix, "", 1).strip()
+                            rt_content = rt_content.replace(prefix, "", 1).strip().lstrip(" :：\n")
                             break
                             
                 rt_user_display = rt_user if rt_user.startswith("@") else f"@{rt_user}"
@@ -2751,42 +2827,27 @@ def save_data(data, user_name, page=None):
                                     media_path_map[r_id] = local_path
                                     
                 if comment_tasks:
-                    import threading
                     from concurrent.futures import ThreadPoolExecutor
+                    from rich.progress import Progress, SpinnerColumn, TextColumn
                     max_workers = DOWNLOAD_NUM_CONCURRENT_MEDIA
-                    spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
-                    spinner_state = {"done": 0, "total": len(comment_tasks), "running": True}
-                    spinner_lock = threading.Lock()
                     
-                    def spinner_thread():
-                        idx = 0
-                        while spinner_state["running"]:
-                            with spinner_lock:
-                                done = spinner_state["done"]
-                                total = spinner_state["total"]
-                            sys.stdout.write(f"\r正在下载评论区媒体资源 {spinner_chars[idx % len(spinner_chars)]} ({done}/{total})")
-                            sys.stdout.flush()
-                            idx += 1
-                            time.sleep(0.1)
-                    
-                    st = threading.Thread(target=spinner_thread, daemon=True)
-                    st.start()
-                    
-                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                        def worker(task):
-                            success = download_file(task["url"], task["save_path"], page, show_progress=False)
-                            return task, success
-                        
-                        for task, success in executor.map(worker, comment_tasks):
-                            if success:
-                                media_path_map[task["id"]] = task["local_path"]
-                            with spinner_lock:
-                                spinner_state["done"] += 1
-                    
-                    spinner_state["running"] = False
-                    st.join(timeout=1)
-                    total = spinner_state["total"]
-                    sys.stdout.write(f"\r正在下载评论区媒体资源 ✅ ({total}/{total})\n")
+                    with Progress(
+                        SpinnerColumn(spinner_name="dots"),
+                        TextColumn("[progress.description]{task.description} ({task.completed}/{task.total})"),
+                        transient=True
+                    ) as progress:
+                        task_id = progress.add_task("", visible=False, total=len(comment_tasks))
+                        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                            def worker(task):
+                                success = download_file(task["url"], task["save_path"], page, show_progress=False)
+                                return task, success
+                            
+                            for task, success in executor.map(worker, comment_tasks):
+                                if success:
+                                    media_path_map[task["id"]] = task["local_path"]
+                                progress.advance(task_id)
+                                
+                    pass
                     sys.stdout.flush()
                                 
                 body_lines.append("\n**评论区:**")
@@ -2871,7 +2932,7 @@ def save_data(data, user_name, page=None):
             except Exception as e:
                 print(f"保存文件 {file_name} 失败: {e}")
             
-    user_dir = os.path.join(OUTPUT_DIR, user_name)
+    user_dir = os.path.join(OUTPUT_DIR, safe_filename(user_name))
     if len(data) == 1:
         post_id = data[0].get("id", "未知ID")
         print(f"  -> 微博 {post_id} 数据已成功保存")
@@ -2910,7 +2971,7 @@ def save_data(data, user_name, page=None):
             posts_by_month[month_str].append(post)
             
         for month_str, month_posts in posts_by_month.items():
-            month_dir = os.path.join(OUTPUT_DIR, user_name, month_str)
+            month_dir = os.path.join(OUTPUT_DIR, safe_filename(user_name), month_str)
             os.makedirs(month_dir, exist_ok=True)
             
             if ENABLE_SAVE_CSV:
@@ -3005,139 +3066,169 @@ def delete_local_post_data(post_id, target_uid=None):
             print(f"未找到对应 UID {target_uid} 的本地数据目录。")
             return
     else:
-        user_dirs = [base_dir]
+        user_dirs = [os.path.join(base_dir, d) for d in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, d))]
         
     deleted_count = {"csv": 0, "json": 0, "sqlite": 0, "md": 0}
     
     for ud in user_dirs:
-        for root, dirs, files in os.walk(ud):
-            for file in files:
-                file_path = os.path.join(root, file)
+        # 优化：精准投递，避免遍历 img/video 等媒体子目录
+        target_files = [
+            os.path.join(ud, 'posts.json'),
+            os.path.join(ud, 'posts.csv'),
+            os.path.join(ud, 'posts.db'),
+            os.path.join(ud, 'comments.json'),
+            os.path.join(ud, 'comments.csv'),
+            os.path.join(ud, 'comments.db')
+        ]
+        # 收集所有的 markdown 存档文件
+        try:
+            for item in os.listdir(ud):
+                if re.match(r'^\d{4}-\d{2}$', item):
+                    month_dir = os.path.join(ud, item)
+                    if os.path.isdir(month_dir):
+                        target_files.extend([
+                            os.path.join(month_dir, f"posts_{item}.json"),
+                            os.path.join(month_dir, f"posts_{item}.csv"),
+                            os.path.join(month_dir, f"posts_{item}.db"),
+                            os.path.join(month_dir, f"comments_{item}.json"),
+                            os.path.join(month_dir, f"comments_{item}.csv"),
+                            os.path.join(month_dir, f"comments_{item}.db")
+                        ])
+                        for md_file in os.listdir(month_dir):
+                            if md_file.endswith('.md') or md_file.endswith('.txt'):
+                                target_files.append(os.path.join(month_dir, md_file))
+        except Exception as e:
+            print("COLLECT ERROR:", e)
+        for file_path in target_files:
+            print("Target file:", file_path)
+            if not os.path.exists(file_path):
+                continue
+
             
-                # 快速预过滤，极大提升删除速度
-                if file.endswith(('.json', '.csv', '.md', '.txt')):
-                    try:
-                        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                            content = f.read()
-                        if target_id not in content and target_bid not in content:
+            # 快速预过滤，极大提升删除速度
+            if file_path.endswith(('.json', '.csv', '.md', '.txt')):
+                try:
+                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read()
+                    if target_id not in content and target_bid not in content:
                             continue
-                    except:
-                        pass
+                except Exception:
+                    pass
             
-                # 处理 JSON 文件
-                if file.endswith('.json'):
-                    try:
-                        with open(file_path, 'r', encoding='utf-8') as f:
-                            data = json.load(f)
-                    
-                        if isinstance(data, list):
-                            original_len = len(data)
-                            new_data = [item for item in data if str(item.get('id', '')) not in (target_id, target_bid) and str(item.get('bid', '')) not in (target_id, target_bid)]
-                            if len(new_data) < original_len:
-                                with open(file_path, 'w', encoding='utf-8') as f:
-                                    json.dump(new_data, f, ensure_ascii=False, indent=2)
-                                deleted_count["json"] += (original_len - len(new_data))
-                                print(f"  [JSON] 已从 {file_path} 中删除 {(original_len - len(new_data))} 条记录")
-                    except Exception as e:
-                        print(f"  读取/修改 JSON 出错: {file_path}, 错误: {e}")
-                    
-                # 处理 CSV 文件
-                elif file.endswith('.csv'):
-                    try:
-                        df = pd.read_csv(file_path, dtype=str)
-                        original_len = len(df)
-                    
-                        # 宽松匹配，只要行内任何一列包含 target_id 或 target_bid，就干掉
-                        mask = pd.Series([False] * len(df), index=df.index)
-                        for col in df.columns:
-                            col_str = df[col].astype(str)
-                            mask = mask | col_str.str.contains(target_id, regex=False) | col_str.str.contains(target_bid, regex=False)
-                    
-                        new_df = df[~mask]
-                        if len(new_df) < original_len:
-                            new_df.to_csv(file_path, index=False, encoding='utf-8-sig')
-                            deleted_count["csv"] += (original_len - len(new_df))
-                            print(f"  [CSV] 已从 {file_path} 中删除 {(original_len - len(new_df))} 条记录")
-                    except Exception as e:
-                        pass
-                    
-                # 处理 SQLite 文件
-                elif file.endswith('.db'):
-                    try:
-                        conn = sqlite3.connect(file_path)
-                        cursor = conn.cursor()
-                    
-                        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-                        tables = [row[0] for row in cursor.fetchall()]
-                    
-                        if 'tweets' in tables:
-                            cursor.execute("PRAGMA table_info(tweets)")
-                            columns = [c[1] for c in cursor.fetchall()]
-                            if 'bid' in columns:
-                                cursor.execute("DELETE FROM tweets WHERE id=? OR id=? OR bid=? OR bid=?", (target_id, target_bid, target_id, target_bid))
+            # 处理 JSON 文件
+            if file_path.endswith('.json'):
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                
+                    if isinstance(data, list):
+                        original_len = len(data)
+                        new_data = [item for item in data if str(item.get('id', '')) not in (target_id, target_bid) and str(item.get('bid', '')) not in (target_id, target_bid)]
+                        if len(new_data) < original_len:
+                            with open(file_path, 'w', encoding='utf-8') as f:
+                                json.dump(new_data, f, ensure_ascii=False, indent=2)
+                            deleted_count["json"] += (original_len - len(new_data))
+                            print(f"  [JSON] 已从 {file_path} 中删除 {(original_len - len(new_data))} 条记录")
+                except Exception as e:
+                    print(f"  读取/修改 JSON 出错: {file_path}, 错误: {e}")
+                
+            # 处理 CSV 文件
+            elif file_path.endswith('.csv'):
+                try:
+                    df = pd.read_csv(file_path, dtype=str)
+                    original_len = len(df)
+                
+                    # 宽松匹配，只要行内任何一列包含 target_id 或 target_bid，就干掉
+                    mask = pd.Series([False] * len(df), index=df.index)
+                    for col in df.columns:
+                        col_str = df[col].astype(str)
+                        mask = mask | col_str.str.contains(target_id, regex=False) | col_str.str.contains(target_bid, regex=False)
+                
+                    new_df = df[~mask]
+                    if len(new_df) < original_len:
+                        new_df.to_csv(file_path, index=False, encoding='utf-8-sig')
+                        deleted_count["csv"] += (original_len - len(new_df))
+                        print(f"  [CSV] 已从 {file_path} 中删除 {(original_len - len(new_df))} 条记录")
+                except Exception as e:
+                    pass
+                
+            # 处理 SQLite 文件
+            elif file_path.endswith('.db'):
+                try:
+                    conn = sqlite3.connect(file_path)
+                    cursor = conn.cursor()
+                
+                    cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                    tables = [row[0] for row in cursor.fetchall()]
+                
+                    if 'tweets' in tables:
+                        cursor.execute("PRAGMA table_info(tweets)")
+                        columns = [c[1] for c in cursor.fetchall()]
+                        if 'bid' in columns:
+                            cursor.execute("DELETE FROM tweets WHERE id IN (?, ?) OR bid IN (?, ?)", (target_id, target_bid, target_id, target_bid))
+                        else:
+                            cursor.execute("DELETE FROM tweets WHERE id IN (?, ?)", (target_id, target_bid))
+                        if cursor.rowcount > 0:
+                            deleted_count["sqlite"] += cursor.rowcount
+                            print(f"  [SQLite] 从 {file_path} 的 tweets 表中删除 {cursor.rowcount} 条记录")
+                        
+                    if 'comments' in tables:
+                        cursor.execute("DELETE FROM comments WHERE post_id=? OR post_id=?", (target_id, target_bid))
+                        if cursor.rowcount > 0:
+                            deleted_count["sqlite"] += cursor.rowcount
+                            print(f"  [SQLite] 从 {file_path} 的 comments 表中删除 {cursor.rowcount} 条记录")
+                        
+                    if 'replies' in tables:
+                        cursor.execute("DELETE FROM replies WHERE post_id=? OR post_id=?", (target_id, target_bid))
+                        if cursor.rowcount > 0:
+                            deleted_count["sqlite"] += cursor.rowcount
+                            print(f"  [SQLite] 从 {file_path} 的 replies 表中删除 {cursor.rowcount} 条记录")
+                        
+                    conn.commit()
+                    conn.close()
+                except Exception as e:
+                    print(f"  读取/修改 SQLite 出错: {file_path}, 错误: {e}")
+                
+            # 处理 Markdown 文件
+            elif file_path.endswith('.md') or file_path.endswith('.txt'):
+                try:
+                    posts = parse_markdown_posts(file_path)
+                    original_len = len(posts)
+                    if original_len > 0:
+                        new_posts = []
+                        for p in posts:
+                            pid = str(p.get("id", ""))
+                            body_content = p.get("body", "")
+                            # 宽松匹配
+                            if target_id in pid or target_bid in pid or target_id in body_content or target_bid in body_content:
+                                pass
                             else:
-                                cursor.execute("DELETE FROM tweets WHERE id=? OR id=?", (target_id, target_bid))
-                            if cursor.rowcount > 0:
-                                deleted_count["sqlite"] += cursor.rowcount
-                                print(f"  [SQLite] 从 {file_path} 的 tweets 表中删除 {cursor.rowcount} 条记录")
+                                new_posts.append(p)
                             
-                        if 'comments' in tables:
-                            cursor.execute("DELETE FROM comments WHERE post_id=? OR post_id=?", (target_id, target_bid))
-                            if cursor.rowcount > 0:
-                                deleted_count["sqlite"] += cursor.rowcount
-                                print(f"  [SQLite] 从 {file_path} 的 comments 表中删除 {cursor.rowcount} 条记录")
-                            
-                        if 'replies' in tables:
-                            cursor.execute("DELETE FROM replies WHERE post_id=? OR post_id=?", (target_id, target_bid))
-                            if cursor.rowcount > 0:
-                                deleted_count["sqlite"] += cursor.rowcount
-                                print(f"  [SQLite] 从 {file_path} 的 replies 表中删除 {cursor.rowcount} 条记录")
-                            
-                        conn.commit()
-                        conn.close()
-                    except Exception as e:
-                        print(f"  读取/修改 SQLite 出错: {file_path}, 错误: {e}")
-                    
-                # 处理 Markdown 文件
-                elif file.endswith('.md') or file.endswith('.txt'):
-                    try:
-                        posts = parse_markdown_posts(file_path)
-                        original_len = len(posts)
-                        if original_len > 0:
-                            new_posts = []
-                            for p in posts:
-                                pid = str(p.get("id", ""))
-                                body_content = p.get("body", "")
-                                # 宽松匹配
-                                if target_id in pid or target_bid in pid or target_id in body_content or target_bid in body_content:
-                                    pass
-                                else:
-                                    new_posts.append(p)
+                        if len(new_posts) < original_len:
+                            if len(new_posts) == 0:
+                                import os
+                                os.remove(file_path)
+                                deleted_count["md"] += original_len
+                                print(f"  [Markdown] 已删除文件 {file_path}")
+                            else:
+                                with open(file_path, "r", encoding="utf-8") as f:
+                                    first_line = f.readline()
                                 
-                            if len(new_posts) < original_len:
-                                if len(new_posts) == 0:
-                                    import os
-                                    os.remove(file_path)
-                                    deleted_count["md"] += original_len
-                                    print(f"  [Markdown] 已删除文件 {file_path}")
-                                else:
-                                    with open(file_path, "r", encoding="utf-8") as f:
-                                        first_line = f.readline()
+                                with open(file_path, "w", encoding="utf-8") as f:
+                                    if first_line.startswith("# "):
+                                        f.write(first_line.strip() + "\n\n")
+                                    else:
+                                        f.write("# 微博存档\n\n")
                                     
-                                    with open(file_path, "w", encoding="utf-8") as f:
-                                        if first_line.startswith("# "):
-                                            f.write(first_line.strip() + "\n\n")
-                                        else:
-                                            f.write("# 微博存档\n\n")
-                                        
-                                        for p in new_posts:
-                                            f.write(f"## {p['time_str']}\n\n")
-                                            f.write(f"{p['body']}\n\n")
-                                            f.write(f"---\n\n")
-                                    deleted_count["md"] += (original_len - len(new_posts))
-                                    print(f"  [Markdown] 已从 {file_path} 中删除 {(original_len - len(new_posts))} 条记录")
-                    except Exception:
-                        pass
+                                    for p in new_posts:
+                                        f.write(f"## {p['time_str']}\n\n")
+                                        f.write(f"{p['body']}\n\n")
+                                        f.write(f"---\n\n")
+                                deleted_count["md"] += (original_len - len(new_posts))
+                                print(f"  [Markdown] 已从 {file_path} 中删除 {(original_len - len(new_posts))} 条记录")
+                except Exception:
+                    pass
 
     print("\n--- 清理完成 ---")
     print(f"共删除 JSON 记录: {deleted_count['json']} 条")
@@ -3172,206 +3263,245 @@ def delete_local_data_by_date(target_date, target_uid=None):
             print(f"未找到对应 UID {target_uid} 的本地数据目录。")
             return
     else:
-        user_dirs = [base_dir]
+        user_dirs = [os.path.join(base_dir, d) for d in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, d))]
         
     deleted_count = {"csv": 0, "json": 0, "sqlite": 0, "md": 0}
     deleted_post_ids = set()
     
     # 第一遍：收集该日期的所有 post_id 和 bid
+    # 优化：采用精确定位，仅读取核心数据文件，避免海量媒体文件的遍历开销
     for ud in user_dirs:
-        for root, dirs, files in os.walk(ud):
-            for file in files:
-                file_path = os.path.join(root, file)
+        primary_files = [
+            os.path.join(ud, 'posts.json'),
+            os.path.join(ud, 'posts.csv'),
+            os.path.join(ud, 'posts.db')
+        ]
+        try:
+            for item in os.listdir(ud):
+                if re.match(r'^\d{4}-\d{2}$', item):
+                    month_dir = os.path.join(ud, item)
+                    if os.path.isdir(month_dir):
+                        primary_files.extend([
+                            os.path.join(month_dir, f"posts_{item}.json"),
+                            os.path.join(month_dir, f"posts_{item}.csv"),
+                            os.path.join(month_dir, f"posts_{item}.db")
+                        ])
+        except Exception: pass
+        for file_path in primary_files:
+            if not os.path.exists(file_path):
+                continue
+
             
-                # 快速预过滤
-                if file.endswith(('.json', '.csv', '.md', '.txt')):
-                    try:
-                        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                            if target_date not in f.read():
-                                continue
-                    except:
-                        pass
-            
-                if file.endswith('.json'):
-                    try:
-                        with open(file_path, 'r', encoding='utf-8') as f:
-                            data = json.load(f)
-                        if isinstance(data, list):
-                            for item in data:
-                                if str(item.get('time', '')).startswith(target_date):
-                                    if 'id' in item: deleted_post_ids.add(str(item['id']))
-                                    if 'bid' in item: deleted_post_ids.add(str(item['bid']))
-                    except: pass
-                elif file.endswith('.csv'):
-                    try:
-                        df = pd.read_csv(file_path, dtype=str)
-                        if 'time' in df.columns:
-                            mask = df['time'].astype(str).str.startswith(target_date)
-                            for _, row in df[mask].iterrows():
-                                if 'id' in row and pd.notna(row['id']): deleted_post_ids.add(str(row['id']))
-                                if 'bid' in row and pd.notna(row['bid']): deleted_post_ids.add(str(row['bid']))
-                    except: pass
-                elif file.endswith('.db'):
-                    try:
-                        conn = sqlite3.connect(file_path)
-                        cursor = conn.cursor()
-                        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-                        tables = [row[0] for row in cursor.fetchall()]
-                        if 'tweets' in tables:
-                            cursor.execute("SELECT id, bid FROM tweets WHERE time LIKE ?", (f"{target_date}%",))
-                            for row in cursor.fetchall():
-                                if row[0]: deleted_post_ids.add(str(row[0]))
-                                if len(row) > 1 and row[1]: deleted_post_ids.add(str(row[1]))
-                        conn.close()
-                    except: pass
+            # 快速预过滤
+            if file_path.endswith(('.json', '.csv', '.md', '.txt')):
+                try:
+                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        if target_date not in f.read():
+                            continue
+                except Exception:
+                    pass
+        
+            if file_path.endswith('.json'):
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    if isinstance(data, list):
+                        for item in data:
+                            if str(item.get('time', '')).startswith(target_date):
+                                if 'id' in item: deleted_post_ids.add(str(item['id']))
+                                if 'bid' in item: deleted_post_ids.add(str(item['bid']))
+                except Exception: pass
+            elif file_path.endswith('.csv'):
+                try:
+                    df = pd.read_csv(file_path, dtype=str)
+                    if 'time' in df.columns:
+                        mask = df['time'].astype(str).str.startswith(target_date)
+                        for _, row in df[mask].iterrows():
+                            if 'id' in row and pd.notna(row['id']): deleted_post_ids.add(str(row['id']))
+                            if 'bid' in row and pd.notna(row['bid']): deleted_post_ids.add(str(row['bid']))
+                except Exception: pass
+            elif file_path.endswith('.db'):
+                try:
+                    conn = sqlite3.connect(file_path)
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                    tables = [row[0] for row in cursor.fetchall()]
+                    if 'tweets' in tables:
+                        cursor.execute("SELECT id, bid FROM tweets WHERE time LIKE ?", (f"{target_date}%",))
+                        for row in cursor.fetchall():
+                            if row[0]: deleted_post_ids.add(str(row[0]))
+                            if len(row) > 1 and row[1]: deleted_post_ids.add(str(row[1]))
+                    conn.close()
+                except Exception: pass
 
     print(f"找到 {len(deleted_post_ids)} 个相关微博 ID，开始清理...")
     
     for ud in user_dirs:
-        for root, dirs, files in os.walk(ud):
-            for file in files:
-                file_path = os.path.join(root, file)
+        month_str = target_date[:7]
+        target_files = [
+            os.path.join(ud, 'posts.json'),
+            os.path.join(ud, 'posts.csv'),
+            os.path.join(ud, 'posts.db'),
+            os.path.join(ud, 'comments.json'),
+            os.path.join(ud, 'comments.csv'),
+            os.path.join(ud, 'comments.db'),
+            os.path.join(ud, month_str, f"{target_date}.md")
+        ]
+        month_dir = os.path.join(ud, month_str)
+        if os.path.exists(month_dir) and os.path.isdir(month_dir):
+            target_files.extend([
+                os.path.join(month_dir, f"posts_{month_str}.json"),
+                os.path.join(month_dir, f"posts_{month_str}.csv"),
+                os.path.join(month_dir, f"posts_{month_str}.db"),
+                os.path.join(month_dir, f"comments_{month_str}.json"),
+                os.path.join(month_dir, f"comments_{month_str}.csv"),
+                os.path.join(month_dir, f"comments_{month_str}.db")
+            ])
+        for file_path in target_files:
+            if not os.path.exists(file_path):
+                continue
+
             
-                # 快速预过滤
-                if file.endswith(('.json', '.csv', '.md', '.txt')):
-                    try:
-                        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                            content = f.read()
-                            if target_date not in content and not any(d_id in content for d_id in deleted_post_ids):
+            # 快速预过滤
+            if file_path.endswith(('.json', '.csv', '.md', '.txt')):
+                try:
+                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read()
+                        if target_date not in content and not any(d_id in content for d_id in deleted_post_ids):
                                 continue
-                    except:
-                        pass
+                except Exception:
+                    pass
             
-                # 处理 JSON 文件
-                if file.endswith('.json'):
-                    try:
-                        with open(file_path, 'r', encoding='utf-8') as f:
-                            data = json.load(f)
-                    
-                        if isinstance(data, list):
-                            original_len = len(data)
-                            new_data = []
-                            for item in data:
-                                is_match = False
-                                if str(item.get('time', '')).startswith(target_date):
-                                    is_match = True
-                                elif str(item.get('id', '')) in deleted_post_ids or str(item.get('bid', '')) in deleted_post_ids:
-                                    is_match = True
-                                elif str(item.get('post_id', '')) in deleted_post_ids:
-                                    is_match = True
-                            
-                                if not is_match:
-                                    new_data.append(item)
-                                
-                            if len(new_data) < original_len:
-                                with open(file_path, 'w', encoding='utf-8') as f:
-                                    json.dump(new_data, f, ensure_ascii=False, indent=2)
-                                deleted_count["json"] += (original_len - len(new_data))
-                                print(f"  [JSON] 已从 {file_path} 中删除 {(original_len - len(new_data))} 条记录")
-                    except Exception as e:
-                        print(f"  读取/修改 JSON 出错: {file_path}, 错误: {e}")
-                    
-                # 处理 CSV 文件
-                elif file.endswith('.csv'):
-                    try:
-                        df = pd.read_csv(file_path, dtype=str)
-                        original_len = len(df)
-                    
-                        mask_time = pd.Series([False]*len(df), index=df.index)
-                        if 'time' in df.columns:
-                            mask_time = df['time'].astype(str).str.startswith(target_date)
+            # 处理 JSON 文件
+            if file_path.endswith('.json'):
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                
+                    if isinstance(data, list):
+                        original_len = len(data)
+                        new_data = []
+                        for item in data:
+                            is_match = False
+                            if str(item.get('time', '')).startswith(target_date):
+                                is_match = True
+                            elif str(item.get('id', '')) in deleted_post_ids or str(item.get('bid', '')) in deleted_post_ids:
+                                is_match = True
+                            elif str(item.get('post_id', '')) in deleted_post_ids:
+                                is_match = True
                         
-                        mask_id = pd.Series([False]*len(df), index=df.index)
-                        if 'id' in df.columns:
-                            mask_id = mask_id | df['id'].astype(str).isin(deleted_post_ids)
-                        if 'bid' in df.columns:
-                            mask_id = mask_id | df['bid'].astype(str).isin(deleted_post_ids)
-                        if 'post_id' in df.columns:
-                            mask_id = mask_id | df['post_id'].astype(str).isin(deleted_post_ids)
-                    
-                        mask = mask_time | mask_id
-                        new_df = df[~mask]
-                        if len(new_df) < original_len:
-                            new_df.to_csv(file_path, index=False, encoding='utf-8-sig')
-                            deleted_count["csv"] += (original_len - len(new_df))
-                            print(f"  [CSV] 已从 {file_path} 中删除 {(original_len - len(new_df))} 条记录")
-                    except Exception as e:
-                        pass
-                    
-                # 处理 SQLite 文件
-                elif file.endswith('.db'):
-                    try:
-                        conn = sqlite3.connect(file_path)
-                        cursor = conn.cursor()
-                    
-                        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-                        tables = [row[0] for row in cursor.fetchall()]
-                    
-                        ids_tuple = tuple(deleted_post_ids) if deleted_post_ids else ('',)
-                        placeholders = ','.join(['?'] * len(ids_tuple))
-                    
-                        if 'tweets' in tables:
-                            cursor.execute(f"DELETE FROM tweets WHERE time LIKE ? OR id IN ({placeholders}) OR bid IN ({placeholders})", (f"{target_date}%",) + ids_tuple + ids_tuple)
-                            if cursor.rowcount > 0:
-                                deleted_count["sqlite"] += cursor.rowcount
-                                print(f"  [SQLite] 从 {file_path} 的 tweets 表中删除 {cursor.rowcount} 条记录")
+                            if not is_match:
+                                new_data.append(item)
                             
-                        if 'comments' in tables:
-                            cursor.execute(f"DELETE FROM comments WHERE time LIKE ? OR post_id IN ({placeholders})", (f"{target_date}%",) + ids_tuple)
-                            if cursor.rowcount > 0:
-                                deleted_count["sqlite"] += cursor.rowcount
-                                print(f"  [SQLite] 从 {file_path} 的 comments 表中删除 {cursor.rowcount} 条记录")
-                            
-                        if 'replies' in tables:
-                            cursor.execute(f"DELETE FROM replies WHERE time LIKE ? OR post_id IN ({placeholders})", (f"{target_date}%",) + ids_tuple)
-                            if cursor.rowcount > 0:
-                                deleted_count["sqlite"] += cursor.rowcount
-                                print(f"  [SQLite] 从 {file_path} 的 replies 表中删除 {cursor.rowcount} 条记录")
-                            
-                        conn.commit()
-                        conn.close()
-                    except Exception as e:
-                        print(f"  读取/修改 SQLite 出错: {file_path}, 错误: {e}")
+                        if len(new_data) < original_len:
+                            with open(file_path, 'w', encoding='utf-8') as f:
+                                json.dump(new_data, f, ensure_ascii=False, indent=2)
+                            deleted_count["json"] += (original_len - len(new_data))
+                            print(f"  [JSON] 已从 {file_path} 中删除 {(original_len - len(new_data))} 条记录")
+                except Exception as e:
+                    print(f"  读取/修改 JSON 出错: {file_path}, 错误: {e}")
+                
+            # 处理 CSV 文件
+            elif file_path.endswith('.csv'):
+                try:
+                    df = pd.read_csv(file_path, dtype=str)
+                    original_len = len(df)
+                
+                    mask_time = pd.Series([False]*len(df), index=df.index)
+                    if 'time' in df.columns:
+                        mask_time = df['time'].astype(str).str.startswith(target_date)
                     
-                # 处理 Markdown 文件
-                elif file.endswith('.md') or file.endswith('.txt'):
-                    try:
-                        posts = parse_markdown_posts(file_path)
-                        original_len = len(posts)
-                        if original_len > 0:
-                            new_posts = []
-                            for p in posts:
-                                pid = str(p.get("id", ""))
-                                time_str = p.get("time_str", "")
-                                if target_date in file or any(d_id in pid for d_id in deleted_post_ids):
-                                    pass
-                                else:
-                                    new_posts.append(p)
+                    mask_id = pd.Series([False]*len(df), index=df.index)
+                    if 'id' in df.columns:
+                        mask_id = mask_id | df['id'].astype(str).isin(deleted_post_ids)
+                    if 'bid' in df.columns:
+                        mask_id = mask_id | df['bid'].astype(str).isin(deleted_post_ids)
+                    if 'post_id' in df.columns:
+                        mask_id = mask_id | df['post_id'].astype(str).isin(deleted_post_ids)
+                
+                    mask = mask_time | mask_id
+                    new_df = df[~mask]
+                    if len(new_df) < original_len:
+                        new_df.to_csv(file_path, index=False, encoding='utf-8-sig')
+                        deleted_count["csv"] += (original_len - len(new_df))
+                        print(f"  [CSV] 已从 {file_path} 中删除 {(original_len - len(new_df))} 条记录")
+                except Exception as e:
+                    pass
+                
+            # 处理 SQLite 文件
+            elif file_path.endswith('.db'):
+                try:
+                    conn = sqlite3.connect(file_path)
+                    cursor = conn.cursor()
+                
+                    cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                    tables = [row[0] for row in cursor.fetchall()]
+                
+                    ids_tuple = tuple(deleted_post_ids) if deleted_post_ids else ('',)
+                    placeholders = ','.join(['?'] * len(ids_tuple))
+                
+                    if 'tweets' in tables:
+                        cursor.execute(f"DELETE FROM tweets WHERE time LIKE ? OR id IN ({placeholders}) OR bid IN ({placeholders})", (f"{target_date}%",) + ids_tuple + ids_tuple)
+                        if cursor.rowcount > 0:
+                            deleted_count["sqlite"] += cursor.rowcount
+                            print(f"  [SQLite] 从 {file_path} 的 tweets 表中删除 {cursor.rowcount} 条记录")
+                        
+                    if 'comments' in tables:
+                        cursor.execute(f"DELETE FROM comments WHERE time LIKE ? OR post_id IN ({placeholders})", (f"{target_date}%",) + ids_tuple)
+                        if cursor.rowcount > 0:
+                            deleted_count["sqlite"] += cursor.rowcount
+                            print(f"  [SQLite] 从 {file_path} 的 comments 表中删除 {cursor.rowcount} 条记录")
+                        
+                    if 'replies' in tables:
+                        cursor.execute(f"DELETE FROM replies WHERE time LIKE ? OR post_id IN ({placeholders})", (f"{target_date}%",) + ids_tuple)
+                        if cursor.rowcount > 0:
+                            deleted_count["sqlite"] += cursor.rowcount
+                            print(f"  [SQLite] 从 {file_path} 的 replies 表中删除 {cursor.rowcount} 条记录")
+                        
+                    conn.commit()
+                    conn.close()
+                except Exception as e:
+                    print(f"  读取/修改 SQLite 出错: {file_path}, 错误: {e}")
+                
+            # 处理 Markdown 文件
+            elif file_path.endswith('.md') or file_path.endswith('.txt'):
+                try:
+                    posts = parse_markdown_posts(file_path)
+                    original_len = len(posts)
+                    if original_len > 0:
+                        new_posts = []
+                        for p in posts:
+                            pid = str(p.get("id", ""))
+                            time_str = p.get("time_str", "")
+                            if target_date in file_path or target_date in time_str or any(d_id in pid for d_id in deleted_post_ids):
+                                pass
+                            else:
+                                new_posts.append(p)
+                            
+                        if len(new_posts) < original_len:
+                            if len(new_posts) == 0:
+                                import os
+                                os.remove(file_path)
+                                deleted_count["md"] += original_len
+                                print(f"  [Markdown] 已删除文件 {file_path}")
+                            else:
+                                with open(file_path, "r", encoding="utf-8") as f:
+                                    first_line = f.readline()
                                 
-                            if len(new_posts) < original_len:
-                                if len(new_posts) == 0:
-                                    import os
-                                    os.remove(file_path)
-                                    deleted_count["md"] += original_len
-                                    print(f"  [Markdown] 已删除文件 {file_path}")
-                                else:
-                                    with open(file_path, "r", encoding="utf-8") as f:
-                                        first_line = f.readline()
+                                with open(file_path, "w", encoding="utf-8") as f:
+                                    if first_line.startswith("# "):
+                                        f.write(first_line.strip() + "\n\n")
+                                    else:
+                                        f.write("# 微博存档\n\n")
                                     
-                                    with open(file_path, "w", encoding="utf-8") as f:
-                                        if first_line.startswith("# "):
-                                            f.write(first_line.strip() + "\n\n")
-                                        else:
-                                            f.write("# 微博存档\n\n")
-                                        
-                                        for p in new_posts:
-                                            f.write(f"## {p['time_str']}\n\n")
-                                            f.write(f"{p['body']}\n\n")
-                                            f.write(f"---\n\n")
-                                    deleted_count["md"] += (original_len - len(new_posts))
-                                    print(f"  [Markdown] 已从 {file_path} 中删除 {(original_len - len(new_posts))} 条记录")
-                    except Exception:
-                        pass
+                                    for p in new_posts:
+                                        f.write(f"## {p['time_str']}\n\n")
+                                        f.write(f"{p['body']}\n\n")
+                                        f.write(f"---\n\n")
+                                deleted_count["md"] += (original_len - len(new_posts))
+                                print(f"  [Markdown] 已从 {file_path} 中删除 {(original_len - len(new_posts))} 条记录")
+                except Exception:
+                    pass
 
     print("\n--- 清理完成 ---")
     print(f"共删除 JSON 记录: {deleted_count['json']} 条")
@@ -3407,6 +3537,5 @@ if __name__ == "__main__":
         print("\n[提示] 用户中断了程序运行。")
         try:
             sys.exit(0)
-        except SystemExit:
-            import os
-            os._exit(0)
+        except Exception:
+            pass
