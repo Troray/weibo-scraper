@@ -28,18 +28,23 @@ DOWNLOAD_MIN_MULTIPART_SIZE_MB = 15 # 大于该值 (MB) 且支持 Range 请求�
 DOWNLOAD_NUM_THREADS = 10            # 多线程并发下载的线程数
 DOWNLOAD_NUM_CONCURRENT_MEDIA = 20   # 同时并发下载的媒体文件数 (图片、视频、评论图片等，仅在非多线程大文件下载时生效)
 
+# --- 日志设置 ---
+ENABLE_FILE_LOGGING = 1         # 是否保存运行日志到本地文件 (1 = 是，0 = 否)
+ENABLE_VERBOSE_LOGGING = 0      # 是否在控制台详细打印每条微博的抓取日志 (1 = 是，0 = 否，默认为 0 以保持控制台整洁)
+LOG_FILE_PATH = 'weibo.log'     # 后台日志文件路径
+
 # --- 存储格式开关 ---
 # 最少必须启用一项，否则无法保存数据
 ENABLE_SAVE_MARKDOWN = 1        # 是否保存微博文本数据为 Markdown 文件 (1 = 启用，0 = 禁用)
 ENABLE_SAVE_CSV = 1             # 是否保存微博文本数据为 CSV 文件 (1 = 启用，0 = 禁用)
 ENABLE_SAVE_SQLITE = 0          # 是否保存微博数据到 SQLite 数据库 (1 = 启用，0 = 禁用)
-ENABLE_SAVE_JSON = 0            # 是否保存微博数据为 JSON 文件 (1 = 启用，0 = 禁用)
+ENABLE_SAVE_JSON = 1            # 是否保存微博数据为 JSON 文件 (1 = 启用，0 = 禁用)
 
 # --- 评论爬取开关 ---
 ENABLE_SCRAPE_COMMENTS = 0      # 是否爬取评论区 (1 = 启用，0 = 禁用，默认禁用以防反爬)
 MAX_COMMENTS_PER_POST = 1000     # 每条微博最多爬取评论数
 MAX_REPLIES_PER_COMMENT = 500     # 每条主评论最多爬取的子回复数 (楼中楼)
-ENABLE_SAVE_COMMENT_MEDIA = 0    # 是否保存评论区中的图片、动图媒体文件 (1 = 启用，0 = 禁用)
+ENABLE_SAVE_COMMENT_MEDIA = 1    # 是否保存评论区中的图片、动图媒体文件 (1 = 启用，0 = 禁用)
 COMMENT_FLOW = 1                # 评论爬取排序: 0 = 热门评论 (数量较少), 1 = 按时间排序 (数量更多，如需爬取全部评论建议设为 1)
 
 # --- 数据保存周期 ---
