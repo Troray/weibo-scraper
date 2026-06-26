@@ -16,6 +16,36 @@ if hasattr(sys.stderr, 'reconfigure'):
 
 import config
 
+import builtins
+import logging
+from config import ENABLE_VERBOSE_LOGGING, ENABLE_FILE_LOGGING, LOG_FILE_PATH
+
+logger = logging.getLogger('weibo_scraper')
+logger.setLevel(logging.INFO)
+
+if getattr(config, 'ENABLE_FILE_LOGGING', 1):
+    file_handler = logging.FileHandler(LOG_FILE_PATH, encoding='utf-8')
+    file_formatter = logging.Formatter('%(asctime)s - %(message)s')
+    file_handler.setFormatter(file_formatter)
+    logger.addHandler(file_handler)
+
+original_print = builtins.print
+
+def verbose_print(*args, **kwargs):
+    msg = " ".join(str(a) for a in args)
+    logger.info(msg)
+    if ENABLE_VERBOSE_LOGGING:
+        original_print(*args, **kwargs)
+    elif msg.startswith('错误:') or msg.startswith('[提示]') or '删除' in msg or '清理完成' in msg or '扫描' in msg or '找到' in msg or '跳过' in msg:
+        original_print(*args, **kwargs)
+
+builtins.print = verbose_print
+
+from rich.console import Console
+from rich.status import Status
+global_console = Console()
+global_dashboard = Status("[bold cyan]准备开始抓取...[/bold cyan]", console=global_console)
+
 # --- 映射统一配置文件 config.py 中的设置 ---
 TARGET_USER_IDS = config.TARGET_USER_IDS
 START_DATE = config.START_DATE
@@ -230,7 +260,7 @@ def download_file(url, save_path, page=None, show_progress=True):
         if not show_progress:
             return
         if total <= 0:
-            sys.stdout.write(f"\r正在下载: {downloaded / 1024 / 1024:.2f} MB...")
+            pass
         else:
             percent = (downloaded / total) * 100
             bar_length = 30
@@ -858,7 +888,7 @@ def scrape_and_save_user_profile(page, user_id, user_name):
     
     if os.path.exists(file_path):
         print(f"ℹ️ 用户 {user_name} ({user_id}) 的个人资料 {user_id}.txt 已存在，跳过重复提取下载。")
-        return True
+        return user_name
         
     print(f"正在获取用户 {user_name} ({user_id}) 的详细个人信息...")
     
@@ -912,7 +942,15 @@ def scrape_and_save_user_profile(page, user_id, user_name):
     try:
         if not user_info and not detail_info:
             print(f"⚠️ 无法通过 API 接口获取用户 {user_id} 的资料")
-            return False
+            return user_name
+            
+        # 如果 API 获取到了昵称，且原本传递进来的是用户 ID，则修正 user_name
+        if str(user_name) == str(user_id) and user_info.get("screen_name"):
+            user_name = str(user_info.get("screen_name")).strip()
+            # 重新构建正确的目录
+            user_dir = os.path.join(OUTPUT_DIR, safe_filename(user_name))
+            os.makedirs(user_dir, exist_ok=True)
+            file_path = os.path.join(user_dir, f"{user_id}.txt")
             
         # 性别映射
         gender_raw = user_info.get("gender", "")
@@ -1278,16 +1316,18 @@ def scrape_weibo_search(scrape_target=None, target_uid=None):
         context = browser.new_context(storage_state=STATE_FILE)
         page = context.new_page()
 
-        for user_idx, user_info in enumerate(user_ids, 1):
-            user_id = user_info["id"]
-            print(f"\n==========================================")
-            print(f"开始抓取第 {user_idx}/{len(user_ids)} 个用户 ID: {user_id}")
-            print(f"==========================================")
+        with global_dashboard:
+            for user_idx, user_info in enumerate(user_ids, 1):
+                user_id = user_info["id"]
+                original_print(f"\n==========================================")
+                original_print(f"开始抓取第 {user_idx}/{len(user_ids)} 个用户 ID: {user_id}")
+                original_print(f"==========================================")
 
-            # 自动获取用户昵称
-            user_name = fetch_user_name(page, user_id)
-            
-            print(f"打开用户 {user_name} ({user_id}) 主页...")
+                # 自动获取用户昵称
+                user_name = fetch_user_name(page, user_id)
+                global_dashboard.update(f"[bold cyan]正在抓取第 {user_idx}/{len(user_ids)} 个用户: {user_name} ({user_id}) | 进度: 初始化...[/bold cyan]")
+                
+                original_print(f"打开用户 {user_name} ({user_id}) 主页...")
             try:
                 page.goto(f"https://weibo.com/u/{user_id}", wait_until="domcontentloaded", timeout=15000)
                 # 等待 React 渲染出主体布局（极快），不必等待所有图片和追踪脚本加载
@@ -1296,7 +1336,11 @@ def scrape_weibo_search(scrape_target=None, target_uid=None):
                 pass
 
             # 获取用户详细资料并保存至 weibo/用户名/用户id.txt
-            scrape_and_save_user_profile(page, user_id, user_name)
+            real_name = scrape_and_save_user_profile(page, user_id, user_name)
+            if real_name and str(real_name) != str(user_name):
+                user_name = real_name
+                # 更新面板上的名字
+                global_dashboard.update(f"[bold cyan]正在抓取第 {user_idx}/{len(user_ids)} 个用户: {user_name} ({user_id}) | 进度: 初始化...[/bold cyan]")
             
             # 加载已存在的微博 ID 进行增量去重判定
             scraped_ids = load_existing_post_ids(user_name)
@@ -1335,10 +1379,14 @@ def scrape_weibo_search(scrape_target=None, target_uid=None):
             processed_ids = set() # 用于去重
 
             for start_str, end_str in user_date_ranges:
+                initial_scraped_count = scraped_count
                 if start_str == "SINGLE_POST":
                     print(f"\n=== 用户 {user_name} ({user_id}) | 开始抓取指定微博 ===")
                 else:
                     print(f"\n=== 用户 {user_name} ({user_id}) | 开始抓取时间段: {start_str} 至 {end_str} ===")
+                
+                date_info = f"指定微博 ID: {scrape_target}" if start_str == "SINGLE_POST" else (f"日期: {start_str}" if start_str == end_str else f"日期: {start_str} 至 {end_str}")
+                global_dashboard.update(f"[bold cyan]正在抓取第 {user_idx}/{len(user_ids)} 个用户: {user_name} ({user_id}) | {date_info} | 进度: {scraped_count} 条已保存...[/bold cyan]")
                 
                 # 结束日期（在 ID 去重模式下，可直接使用 end_str，不再需要增加 1 天）
                 search_end_str = end_str
@@ -1547,11 +1595,11 @@ def scrape_weibo_search(scrape_target=None, target_uid=None):
 
                             # --- 去重与时间过滤 ---
                             if post_id in processed_ids:
-                                print(f"  -> 跳过本次已处理的重复微博: {post_id}")
+                                print(f"  ⏭️ 跳过本次已处理的重复微博: {post_id}")
                                 continue
                                 
                             if post_id in scraped_ids:
-                                print(f"  -> 跳过历史已抓取的重复微博: {post_id}")
+                                print(f"  ⏭️ 跳过历史已抓取的重复微博: {post_id}")
                                 continue
                                 
                             # 严格时间范围过滤 (单篇抓取时忽略时间过滤)
@@ -1830,8 +1878,14 @@ def scrape_weibo_search(scrape_target=None, target_uid=None):
                                 "retweet_ip_location": retweet_ip_location
                             }
                             try:
-                                save_data([post_data], user_name, page)
+                                global_dashboard.stop()
+                                try:
+                                    save_data([post_data], user_name, page)
+                                finally:
+                                    global_dashboard.start()
                                 scraped_count += 1
+                                date_info = f"指定微博 ID: {scrape_target}" if start_str == "SINGLE_POST" else (f"日期: {start_str}" if start_str == end_str else f"日期: {start_str} 至 {end_str}")
+                                global_dashboard.update(f"[bold cyan]正在抓取第 {user_idx}/{len(user_ids)} 个用户: {user_name} ({user_id}) | {date_info} | 进度: {scraped_count} 条已保存...[/bold cyan]")
                                 scraped_ids.add(post_id)
                                 processed_ids.add(post_id)
                             except Exception as save_err:
@@ -1858,9 +1912,15 @@ def scrape_weibo_search(scrape_target=None, target_uid=None):
                         print("已到达最后一页。")
                         break
                 
+                day_saved = scraped_count - initial_scraped_count
+                if start_str != "SINGLE_POST":
+                    global_dashboard.stop()
+                    global_console.print(f"  [green]✅ {start_str} 共保存了 {day_saved} 条新微博[/green]")
+                    global_dashboard.start()
+                
                 time.sleep(3)
 
-            print(f"\n✅ 用户 {user_name} 抓取完毕，本次共新抓取并保存了 {scraped_count} 条微博。")
+            original_print(f"\n✅ 用户 {user_name} 抓取完毕，本次共新抓取并保存了 {scraped_count} 条微博。")
 
             # 该用户完全抓取成功后，更新对应文件的增量时间戳 (单篇/单日指定时不要更新)
             if TARGET_USER_IDS.endswith(".txt") and not scrape_target:
@@ -1983,27 +2043,13 @@ def save_to_csv(data, user_name, target_dir=None, suffix=""):
     
     if os.path.exists(csv_path):
         try:
-            df_old = pd.read_csv(csv_path, dtype={"id": str})
-            df_old["id"] = df_old["id"].astype(str)
-            # Ensure old columns exist
-            for col in [
-                "device", "ip_location", "retweet_user", "retweet_content", "retweet_images",
-                "retweet_videos", "retweet_livephotos", "retweet_time", "retweet_link",
-                "retweet_id", "retweet_device", "retweet_ip_location"
-            ]:
-                if col not in df_old.columns:
-                    df_old[col] = ""
-            df_combined = pd.concat([df_new, df_old]).drop_duplicates(subset=["id"], keep="first")
-            df_combined = df_combined.sort_values(by="time", ascending=True)
-            df_combined.to_csv(csv_path, index=False, encoding="utf-8-sig")
-            # print("CSV updated.")
+            # 采用 O(1) 追加写入，不再全量读写合并，极大提升写入性能
+            df_new.to_csv(csv_path, mode='a', header=False, index=False, encoding="utf-8-sig")
         except Exception as e:
-            print(f"  -> ⚠️ 合并历史 CSV 归档失败: {e}，正在尝试重写...")
+            print(f"  -> ⚠️ 追加写入 CSV 归档失败: {e}，将尝试重写...")
             df_new.to_csv(csv_path, index=False, encoding="utf-8-sig")
-            # print("CSV written.")
     else:
         df_new.to_csv(csv_path, index=False, encoding="utf-8-sig")
-        # print("CSV written.")
         
     # Comments CSV
     if ENABLE_SCRAPE_COMMENTS:
@@ -2052,18 +2098,10 @@ def save_to_csv(data, user_name, target_dir=None, suffix=""):
             df_comments_new = pd.DataFrame(comments_data)
             if os.path.exists(comments_csv_path):
                 try:
-                    df_comments_old = pd.read_csv(comments_csv_path, dtype={"id": str, "post_id": str, "parent_id": str, "user_id": str})
-                    df_comments_old["id"] = df_comments_old["id"].astype(str)
-                    if "source" not in df_comments_old.columns:
-                        df_comments_old["source"] = ""
-                    df_comments_combined = pd.concat([df_comments_new, df_comments_old]).drop_duplicates(subset=["id"], keep="first")
-                    df_comments_combined = df_comments_combined.sort_values(by="time", ascending=True)
-                    df_comments_combined.to_csv(comments_csv_path, index=False, encoding="utf-8-sig")
-                    # print("Comments CSV updated.")
+                    df_comments_new.to_csv(comments_csv_path, mode='a', header=False, index=False, encoding="utf-8-sig")
                 except Exception as e:
-                    print(f"  -> ⚠️ 合并历史评论 CSV 失败: {e}，正在尝试重写...")
+                    print(f"  -> ⚠️ 追加写入评论 CSV 失败: {e}，将尝试重写...")
                     df_comments_new.to_csv(comments_csv_path, index=False, encoding="utf-8-sig")
-                    # print("Comments CSV written.")
             else:
                 df_comments_new.to_csv(comments_csv_path, index=False, encoding="utf-8-sig")
                 # print("Comments CSV written.")
@@ -2238,7 +2276,7 @@ def save_to_sqlite(data, user_name, target_dir=None, suffix=""):
                             reply.get("source", "")
                         ))
         
-    conn.commit()
+        conn.commit()
     conn.close()
     # print(f"SQLite synced: {db_path}")
 
@@ -2291,32 +2329,65 @@ def save_to_json(data, user_name, target_dir=None, suffix=""):
             
         new_json_data.append(post_item)
         
-    if os.path.exists(json_path):
-        try:
-            with open(json_path, "r", encoding="utf-8") as f:
-                old_json_data = json.load(f)
-            
-            combined_dict = {str(item["id"]): item for item in old_json_data}
-            for item in new_json_data:
-                combined_dict[str(item["id"])] = item
-                
-            merged_list = list(combined_dict.values())
-            merged_list.sort(key=lambda x: x.get("time", ""))
-            
-            with open(json_path, "w", encoding="utf-8") as f:
-                json.dump(merged_list, f, ensure_ascii=False, indent=2)
-            # print("JSON updated.")
-            return
-        except Exception as e:
-            print(f"  -> ⚠️ 合并历史 JSON 失败: {e}，正在尝试重写...")
-            
+    # 采用 O(1) 尾部追加逻辑，避免随着数据量增长导致重复全量读写的 I/O 灾难
     new_json_data.sort(key=lambda x: x.get("time", ""))
+    
+    if not os.path.exists(json_path):
+        try:
+            with open(json_path, "w", encoding="utf-8") as f:
+                json.dump(new_json_data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"  -> ❌ 保存 JSON 失败: {e}")
+        return
+
     try:
-        with open(json_path, "w", encoding="utf-8") as f:
-            json.dump(new_json_data, f, ensure_ascii=False, indent=2)
-        # print("JSON written.")
+        with open(json_path, "r+", encoding="utf-8") as f:
+            f.seek(0, os.SEEK_END)
+            pos = f.tell()
+            found = False
+            while pos > 0:
+                pos -= 1
+                f.seek(pos, os.SEEK_SET)
+                if f.read(1) == ']':
+                    found = True
+                    break
+            
+            if found:
+                f.seek(0)
+                file_content = f.read(pos).strip()
+                is_empty = file_content.endswith('[')
+                
+                f.seek(pos, os.SEEK_SET)
+                new_json_str = json.dumps(new_json_data, ensure_ascii=False, indent=2)
+                new_json_str = new_json_str.strip()
+                if new_json_str.startswith('['):
+                    new_json_str = new_json_str[1:]
+                if new_json_str.endswith(']'):
+                    new_json_str = new_json_str[:-1]
+                new_json_str = new_json_str.strip()
+                
+                if new_json_str:
+                    if not is_empty:
+                        f.write(',\n  ')
+                    else:
+                        f.write('\n  ')
+                    f.write(new_json_str)
+                    f.write('\n]')
+                f.truncate()
+            else:
+                # 兼容处理：文件损坏或非数组格式时，退化为全量覆盖
+                f.seek(0)
+                try:
+                    old_data = json.load(f)
+                except:
+                    old_data = []
+                if isinstance(old_data, list):
+                    old_data.extend(new_json_data)
+                f.seek(0)
+                f.truncate()
+                json.dump(old_data, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        print(f"  -> ❌ 保存 JSON 失败: {e}")
+        print(f"  -> ⚠️ O(1) 追加 JSON 失败: {e}")
 
 
 def save_data(data, user_name, page=None):
@@ -2448,42 +2519,27 @@ def save_data(data, user_name, page=None):
                         local_image_paths[idx] = local_path
                 
                 if tasks:
-                    import threading
                     from concurrent.futures import ThreadPoolExecutor
+                    from rich.progress import Progress, SpinnerColumn, TextColumn
                     max_workers = DOWNLOAD_NUM_CONCURRENT_MEDIA
-                    spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
-                    spinner_state = {"done": 0, "total": len(tasks), "running": True}
-                    spinner_lock = threading.Lock()
                     
-                    def spinner_thread():
-                        idx = 0
-                        while spinner_state["running"]:
-                            with spinner_lock:
-                                done = spinner_state["done"]
-                                total = spinner_state["total"]
-                            sys.stdout.write(f"\r  正在下载图片 {spinner_chars[idx % len(spinner_chars)]} ({done}/{total})")
-                            sys.stdout.flush()
-                            idx += 1
-                            time.sleep(0.1)
-                    
-                    st = threading.Thread(target=spinner_thread, daemon=True)
-                    st.start()
-                    
-                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                        def worker(task):
-                            success = download_file(task["url"], task["save_path"], page, show_progress=False)
-                            return task, success
-                        
-                        for task, success in executor.map(worker, tasks):
-                            if success:
-                                local_image_paths[task["idx"]] = task["local_path"]
-                            with spinner_lock:
-                                spinner_state["done"] += 1
-                    
-                    spinner_state["running"] = False
-                    st.join(timeout=1)
-                    total = spinner_state["total"]
-                    sys.stdout.write(f"\r  正在下载图片 ✅ ({total}/{total})\n")
+                    with Progress(
+                        SpinnerColumn(spinner_name="dots"),
+                        TextColumn("[progress.description]{task.description} ({task.completed}/{task.total})"),
+                        transient=True
+                    ) as progress:
+                        task_id = progress.add_task("", visible=False, total=len(tasks))
+                        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                            def worker(task):
+                                success = download_file(task["url"], task["save_path"], page, show_progress=False)
+                                return task, success
+                            
+                            for task, success in executor.map(worker, tasks):
+                                if success:
+                                    local_image_paths[task["idx"]] = task["local_path"]
+                                progress.advance(task_id)
+                                
+                    pass
                     sys.stdout.flush()
                                 
                 local_image_paths = [p for p in local_image_paths if p is not None]
@@ -2518,42 +2574,27 @@ def save_data(data, user_name, page=None):
                         local_video_paths[idx] = local_path
                 
                 if tasks:
-                    import threading
                     from concurrent.futures import ThreadPoolExecutor
+                    from rich.progress import Progress, SpinnerColumn, TextColumn
                     max_workers = DOWNLOAD_NUM_CONCURRENT_MEDIA
-                    spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
-                    spinner_state = {"done": 0, "total": len(tasks), "running": True}
-                    spinner_lock = threading.Lock()
                     
-                    def spinner_thread():
-                        idx = 0
-                        while spinner_state["running"]:
-                            with spinner_lock:
-                                done = spinner_state["done"]
-                                total = spinner_state["total"]
-                            sys.stdout.write(f"\r  正在下载视频 {spinner_chars[idx % len(spinner_chars)]} ({done}/{total})")
-                            sys.stdout.flush()
-                            idx += 1
-                            time.sleep(0.1)
-                    
-                    st = threading.Thread(target=spinner_thread, daemon=True)
-                    st.start()
-                    
-                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                        def worker(task):
-                            success = download_file(task["url"], task["save_path"], page, show_progress=False)
-                            return task, success
-                        
-                        for task, success in executor.map(worker, tasks):
-                            if success:
-                                local_video_paths[task["idx"]] = task["local_path"]
-                            with spinner_lock:
-                                spinner_state["done"] += 1
-                    
-                    spinner_state["running"] = False
-                    st.join(timeout=1)
-                    total = spinner_state["total"]
-                    sys.stdout.write(f"\r  正在下载视频 ✅ ({total}/{total})\n")
+                    with Progress(
+                        SpinnerColumn(spinner_name="dots"),
+                        TextColumn("[progress.description]{task.description} ({task.completed}/{task.total})"),
+                        transient=True
+                    ) as progress:
+                        task_id = progress.add_task("", visible=False, total=len(tasks))
+                        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                            def worker(task):
+                                success = download_file(task["url"], task["save_path"], page, show_progress=False)
+                                return task, success
+                            
+                            for task, success in executor.map(worker, tasks):
+                                if success:
+                                    local_video_paths[task["idx"]] = task["local_path"]
+                                progress.advance(task_id)
+                                
+                    pass
                     sys.stdout.flush()
                                 
                 local_video_paths = [p for p in local_video_paths if p is not None]
@@ -2586,42 +2627,27 @@ def save_data(data, user_name, page=None):
                         local_livephoto_paths[idx] = local_path
                         
                 if tasks:
-                    import threading
                     from concurrent.futures import ThreadPoolExecutor
+                    from rich.progress import Progress, SpinnerColumn, TextColumn
                     max_workers = DOWNLOAD_NUM_CONCURRENT_MEDIA
-                    spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
-                    spinner_state = {"done": 0, "total": len(tasks), "running": True}
-                    spinner_lock = threading.Lock()
                     
-                    def spinner_thread():
-                        idx = 0
-                        while spinner_state["running"]:
-                            with spinner_lock:
-                                done = spinner_state["done"]
-                                total = spinner_state["total"]
-                            sys.stdout.write(f"\r  正在下载实况照片 {spinner_chars[idx % len(spinner_chars)]} ({done}/{total})")
-                            sys.stdout.flush()
-                            idx += 1
-                            time.sleep(0.1)
-                    
-                    st = threading.Thread(target=spinner_thread, daemon=True)
-                    st.start()
-                    
-                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                        def worker(task):
-                            success = download_file(task["url"], task["save_path"], page, show_progress=False)
-                            return task, success
-                        
-                        for task, success in executor.map(worker, tasks):
-                            if success:
-                                local_livephoto_paths[task["idx"]] = task["local_path"]
-                            with spinner_lock:
-                                spinner_state["done"] += 1
-                    
-                    spinner_state["running"] = False
-                    st.join(timeout=1)
-                    total = spinner_state["total"]
-                    sys.stdout.write(f"\r  正在下载实况照片 ✅ ({total}/{total})\n")
+                    with Progress(
+                        SpinnerColumn(spinner_name="dots"),
+                        TextColumn("[progress.description]{task.description} ({task.completed}/{task.total})"),
+                        transient=True
+                    ) as progress:
+                        task_id = progress.add_task("", visible=False, total=len(tasks))
+                        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                            def worker(task):
+                                success = download_file(task["url"], task["save_path"], page, show_progress=False)
+                                return task, success
+                            
+                            for task, success in executor.map(worker, tasks):
+                                if success:
+                                    local_livephoto_paths[task["idx"]] = task["local_path"]
+                                progress.advance(task_id)
+                                
+                    pass
                     sys.stdout.flush()
                                 
                 local_livephoto_paths = [p for p in local_livephoto_paths if p is not None]
@@ -2668,7 +2694,7 @@ def save_data(data, user_name, page=None):
                     prefix2 = f"@{rt_user}" if not rt_user.startswith("@") else rt_user
                     for prefix in (prefix2, prefix1):
                         if rt_content.startswith(prefix):
-                            rt_content = rt_content.replace(prefix, "", 1).strip()
+                            rt_content = rt_content.replace(prefix, "", 1).strip().lstrip(" :：\n")
                             break
                             
                 rt_user_display = rt_user if rt_user.startswith("@") else f"@{rt_user}"
@@ -2772,42 +2798,27 @@ def save_data(data, user_name, page=None):
                                     media_path_map[r_id] = local_path
                                     
                 if comment_tasks:
-                    import threading
                     from concurrent.futures import ThreadPoolExecutor
+                    from rich.progress import Progress, SpinnerColumn, TextColumn
                     max_workers = DOWNLOAD_NUM_CONCURRENT_MEDIA
-                    spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
-                    spinner_state = {"done": 0, "total": len(comment_tasks), "running": True}
-                    spinner_lock = threading.Lock()
                     
-                    def spinner_thread():
-                        idx = 0
-                        while spinner_state["running"]:
-                            with spinner_lock:
-                                done = spinner_state["done"]
-                                total = spinner_state["total"]
-                            sys.stdout.write(f"\r正在下载评论区媒体资源 {spinner_chars[idx % len(spinner_chars)]} ({done}/{total})")
-                            sys.stdout.flush()
-                            idx += 1
-                            time.sleep(0.1)
-                    
-                    st = threading.Thread(target=spinner_thread, daemon=True)
-                    st.start()
-                    
-                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                        def worker(task):
-                            success = download_file(task["url"], task["save_path"], page, show_progress=False)
-                            return task, success
-                        
-                        for task, success in executor.map(worker, comment_tasks):
-                            if success:
-                                media_path_map[task["id"]] = task["local_path"]
-                            with spinner_lock:
-                                spinner_state["done"] += 1
-                    
-                    spinner_state["running"] = False
-                    st.join(timeout=1)
-                    total = spinner_state["total"]
-                    sys.stdout.write(f"\r正在下载评论区媒体资源 ✅ ({total}/{total})\n")
+                    with Progress(
+                        SpinnerColumn(spinner_name="dots"),
+                        TextColumn("[progress.description]{task.description} ({task.completed}/{task.total})"),
+                        transient=True
+                    ) as progress:
+                        task_id = progress.add_task("", visible=False, total=len(comment_tasks))
+                        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                            def worker(task):
+                                success = download_file(task["url"], task["save_path"], page, show_progress=False)
+                                return task, success
+                            
+                            for task, success in executor.map(worker, comment_tasks):
+                                if success:
+                                    media_path_map[task["id"]] = task["local_path"]
+                                progress.advance(task_id)
+                                
+                    pass
                     sys.stdout.flush()
                                 
                 body_lines.append("\n**评论区:**")
@@ -3125,9 +3136,9 @@ def delete_local_post_data(post_id, target_uid=None):
                         cursor.execute("PRAGMA table_info(tweets)")
                         columns = [c[1] for c in cursor.fetchall()]
                         if 'bid' in columns:
-                            cursor.execute("DELETE FROM tweets WHERE id=? OR id=? OR bid=? OR bid=?", (target_id, target_bid, target_id, target_bid))
+                            cursor.execute("DELETE FROM tweets WHERE id IN (?, ?) OR bid IN (?, ?)", (target_id, target_bid, target_id, target_bid))
                         else:
-                            cursor.execute("DELETE FROM tweets WHERE id=? OR id=?", (target_id, target_bid))
+                            cursor.execute("DELETE FROM tweets WHERE id IN (?, ?)", (target_id, target_bid))
                         if cursor.rowcount > 0:
                             deleted_count["sqlite"] += cursor.rowcount
                             print(f"  [SQLite] 从 {file_path} 的 tweets 表中删除 {cursor.rowcount} 条记录")
@@ -3497,6 +3508,5 @@ if __name__ == "__main__":
         print("\n[提示] 用户中断了程序运行。")
         try:
             sys.exit(0)
-        except SystemExit:
-            import os
-            os._exit(0)
+        except Exception:
+            pass
