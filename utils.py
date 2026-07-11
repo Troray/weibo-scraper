@@ -27,6 +27,15 @@ import sys
 import re
 from datetime import datetime, timedelta
 
+def safe_filename(name: str) -> str:
+    """
+    将包含在文件名或目录名中的非法字符替换为下划线，确保文件路径在各个操作系统上的安全性。
+    """
+    if not name:
+        return "Unknown"
+    # Windows 和 Linux 文件系统不支持的字符
+    return re.sub(r'[\\/*?:"<>|]', "_", name).strip()
+
 def parse_weibo_time(time_str, reference_date=None):
     """
     将微博的时间字符串转换为 datetime 对象。

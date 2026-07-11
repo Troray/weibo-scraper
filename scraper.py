@@ -16,6 +16,36 @@ from playwright.sync_api import sync_playwright, TimeoutError
 from utils import *
 import config
 
+import builtins
+import logging
+from config import ENABLE_VERBOSE_LOGGING, ENABLE_FILE_LOGGING, LOG_FILE_PATH
+
+logger = logging.getLogger('weibo_scraper')
+logger.setLevel(logging.INFO)
+
+if getattr(config, 'ENABLE_FILE_LOGGING', 1):
+    file_handler = logging.FileHandler(LOG_FILE_PATH, encoding='utf-8')
+    file_formatter = logging.Formatter('%(asctime)s - %(message)s')
+    file_handler.setFormatter(file_formatter)
+    logger.addHandler(file_handler)
+
+original_print = builtins.print
+
+def verbose_print(*args, **kwargs):
+    msg = " ".join(str(a) for a in args)
+    logger.info(msg)
+    if ENABLE_VERBOSE_LOGGING:
+        original_print(*args, **kwargs)
+    elif msg.startswith('错误:') or msg.startswith('[提示]') or '删除' in msg or '清理完成' in msg or '扫描' in msg or '找到' in msg or '跳过' in msg:
+        original_print(*args, **kwargs)
+
+builtins.print = verbose_print
+
+from rich.console import Console
+from rich.status import Status
+global_console = Console()
+global_dashboard = Status("[bold cyan]准备开始抓取...[/bold cyan]", console=global_console)
+
 # --- 映射统一配置文件 config.py 中的设置 ---
 TARGET_USER_IDS = config.TARGET_USER_IDS
 START_DATE = config.START_DATE
