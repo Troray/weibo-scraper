@@ -20,20 +20,13 @@ import builtins
 import logging
 from config import ENABLE_VERBOSE_LOGGING, ENABLE_FILE_LOGGING, LOG_FILE_PATH
 
-logger = logging.getLogger('weibo_scraper')
-logger.setLevel(logging.INFO)
-
-if getattr(config, 'ENABLE_FILE_LOGGING', 1):
-    file_handler = logging.FileHandler(LOG_FILE_PATH, encoding='utf-8')
-    file_formatter = logging.Formatter('%(asctime)s - %(message)s')
-    file_handler.setFormatter(file_formatter)
-    logger.addHandler(file_handler)
+# logger is already initialized and set up in utils.py
 
 original_print = builtins.print
 
 def verbose_print(*args, **kwargs):
     msg = " ".join(str(a) for a in args)
-    logger.info(msg)
+    logger.info(msg.strip())
     if ENABLE_VERBOSE_LOGGING:
         original_print(*args, **kwargs)
     elif msg.startswith('错误:') or msg.startswith('[提示]') or '删除' in msg or '清理完成' in msg or '扫描' in msg or '找到' in msg or '跳过' in msg:
@@ -225,14 +218,14 @@ class WeiboStorage:
                     current_downloaded = sum(downloaded_bytes)
                     elapsed = time.time() - start_time
                     speed = (current_downloaded / 1024 / 1024) / elapsed if elapsed > 0 else 0.0
-                    self.print_progress(current_downloaded, total_size, speed)
+                    print_progress(current_downloaded, total_size, speed)
                     time.sleep(0.5)
                 
                 for t in threads:
                     t.join()
                 
                 if not errors and sum(downloaded_bytes) == total_size:
-                    self.print_progress(total_size, total_size)
+                    print_progress(total_size, total_size)
                     if show_progress:
                         print("\n✅ 多线程下载完成。")
                     return True
@@ -262,9 +255,9 @@ class WeiboStorage:
                     
                         elapsed = time.time() - start_time
                         speed = (downloaded / 1024 / 1024) / elapsed if elapsed > 0 else 0.0
-                        self.print_progress(downloaded, total, speed)
+                        print_progress(downloaded, total, speed)
                     
-                self.print_progress(downloaded, total)
+                print_progress(downloaded, total)
                 if show_progress:
                     print("\n✅ 下载完成。")
                 return True

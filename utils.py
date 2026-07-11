@@ -156,12 +156,12 @@ def print_rich(*args, **kwargs):
     msg = " ".join(str(a) for a in args)
     # 简单正则去除常用的 rich 标签
     clean_msg = re.sub(r'\[/?(?:bold\s+)?(?:red|yellow|green|cyan|blue|magenta|white)\]', '', msg)
-    logger.info(clean_msg)
+    logger.info(clean_msg.strip())
     global_console.print(*args, **kwargs)
 
 def verbose_print(*args, **kwargs):
     msg = ' '.join((str(a) for a in args))
-    logger.info(msg)
+    logger.info(msg.strip())
     if ENABLE_VERBOSE_LOGGING:
         original_print(*args, **kwargs)
     elif msg.startswith('错误:') or msg.startswith('[提示]') or '删除' in msg or ('清理完成' in msg) or ('扫描' in msg) or ('找到' in msg) or ('跳过' in msg):
