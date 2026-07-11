@@ -1,3 +1,29 @@
+import os
+
+import builtins
+import logging
+from config import ENABLE_VERBOSE_LOGGING, ENABLE_FILE_LOGGING, LOG_FILE_PATH
+import config
+
+logger = logging.getLogger('weibo_scraper')
+logger.setLevel(logging.INFO)
+
+if getattr(config, 'ENABLE_FILE_LOGGING', 1):
+    file_handler = logging.FileHandler(LOG_FILE_PATH, encoding='utf-8')
+    file_formatter = logging.Formatter('%(asctime)s - %(message)s')
+    file_handler.setFormatter(file_formatter)
+    logger.addHandler(file_handler)
+
+original_print = builtins.print
+from rich.console import Console
+from rich.status import Status
+global_console = Console()
+global_dashboard = Status('[bold cyan]准备开始抓取...[/bold cyan]', console=global_console)
+
+import builtins
+import config
+import sys
+
 import re
 from datetime import datetime, timedelta
 
@@ -112,3 +138,156 @@ def parse_weibo_time(time_str, reference_date=None):
     # 如果都匹配不上，返回 None 或当前时间（视情况而定，这里返回 None 以便报错）
     print(f"Warning: Unknown time format: {time_str}")
     return None
+
+def print_rich(*args, **kwargs):
+    """
+    打印带有 Rich 语法标签的彩色文本，并自动去除标签后写入日志文件。
+    这样既能保证终端的颜色高亮，又不会导致日志文件中出现 [bold red] 等字面量标签。
+    """
+    msg = " ".join(str(a) for a in args)
+    # 简单正则去除常用的 rich 标签
+    clean_msg = re.sub(r'\[/?(?:bold\s+)?(?:red|yellow|green|cyan|blue|magenta|white)\]', '', msg)
+    logger.info(clean_msg)
+    global_console.print(*args, **kwargs)
+
+def verbose_print(*args, **kwargs):
+    msg = ' '.join((str(a) for a in args))
+    logger.info(msg)
+    if ENABLE_VERBOSE_LOGGING:
+        original_print(*args, **kwargs)
+    elif msg.startswith('错误:') or msg.startswith('[提示]') or '删除' in msg or ('清理完成' in msg) or ('扫描' in msg) or ('找到' in msg) or ('跳过' in msg):
+        original_print(*args, **kwargs)
+
+def safe_filename(name):
+    """
+    过滤掉 Windows/Linux/Mac 中不能用于文件名或路径的安全隐患字符，
+    防止恶意路径穿越（如 ../）或由于特殊字符导致程序越界崩溃。
+    """
+    if not name:
+        return 'unknown'
+    name = re.sub('[\\\\/:*?"<>|]', '_', str(name))
+    name = name.replace('..', '_')
+    return name.strip()
+
+def get_user_ids(config_val):
+    """
+    解析配置的用户 ID，支持单个 ID、ID 列表或文本文件路径。
+    返回格式: [{"id": user_id, "username": username_or_None, "start_time": datetime_or_None}]
+    """
+    raw_list = []
+    if isinstance(config_val, (list, tuple, set)):
+        raw_list = [str(uid).strip() for uid in config_val if str(uid).strip()]
+    elif isinstance(config_val, str):
+        config_val = config_val.strip()
+        if config_val.endswith('.txt'):
+            if os.path.exists(config_val):
+                with open(config_val, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and (not line.startswith('#')):
+                            raw_list.append(line)
+            else:
+                print(f"⚠️ 警告: 找不到用户 ID 配置文件 '{config_val}'，将其作为单个 ID 处理。")
+                raw_list = [config_val]
+        else:
+            raw_list = [config_val]
+    elif config_val is not None:
+        raw_list = [str(config_val).strip()]
+    users = []
+    for item in raw_list:
+        parts = item.split()
+        if not parts:
+            continue
+        user_id = parts[0]
+        username = None
+        start_time = None
+        for part in parts[1:]:
+            parsed_dt = None
+            for fmt in ('%Y-%m-%dT%H:%M:%S', '%Y-%m-%d %H:%M:%S', '%Y-%m-%d'):
+                try:
+                    parsed_dt = datetime.strptime(part, fmt)
+                    break
+                except ValueError:
+                    continue
+            if parsed_dt is not None:
+                start_time = parsed_dt
+            else:
+                username = part
+        users.append({'id': user_id, 'username': username, 'start_time': start_time})
+    return users
+
+def get_date_ranges(start_date, end_date, step_days=1):
+    """
+    将大时间段切分为极小的时间段（默认1天），以避免微博搜索结果被截断。
+    返回格式: [("2023-01-01", "2023-01-01"), ("2023-01-02", "2023-01-02")...]
+    """
+    start = datetime.strptime(start_date, '%Y-%m-%d')
+    end = datetime.strptime(end_date, '%Y-%m-%d')
+    ranges = []
+    current = start
+    while current <= end:
+        current_end = current + timedelta(days=step_days - 1)
+        if current_end > end:
+            current_end = end
+        ranges.append((current.strftime('%Y-%m-%d'), current_end.strftime('%Y-%m-%d')))
+        current = current_end + timedelta(days=1)
+    return ranges
+
+def parse_weibo_stats(stats_text):
+    """
+    解析微博的转发、评论、点赞数量。
+    返回: (reposts, comments, attitudes)
+    """
+    if not stats_text:
+        return (0, 0, 0)
+    stats_text = re.sub('\\s+', ' ', stats_text).strip()
+
+    def parse_num(num_str):
+        if not num_str:
+            return 0
+        if '万' in num_str:
+            try:
+                val = float(num_str.replace('万', '').strip())
+                return int(val * 10000)
+            except Exception:
+                return 0
+        try:
+            return int(num_str)
+        except Exception:
+            return 0
+    parts = stats_text.split()
+    pure_numbers = []
+    for p in parts:
+        if re.match('^\\d+(\\.\\d+)?万?$', p):
+            pure_numbers.append(p)
+    if len(pure_numbers) == 3:
+        return (parse_num(pure_numbers[0]), parse_num(pure_numbers[1]), parse_num(pure_numbers[2]))
+    reposts = 0
+    comments = 0
+    likes = 0
+    repost_match = re.search('(?:转发|转评|共转)\\s*(\\d+(?:\\.\\d+)?万?)', stats_text)
+    if repost_match:
+        reposts = parse_num(repost_match.group(1))
+    comment_match = re.search('评论\\s*(\\d+(?:\\.\\d+)?万?)', stats_text)
+    if comment_match:
+        comments = parse_num(comment_match.group(1))
+    like_match = re.search('(?:点赞|赞|态度)\\s*(\\d+(?:\\.\\d+)?万?)', stats_text)
+    if like_match:
+        likes = parse_num(like_match.group(1))
+    if reposts == 0 and comments == 0 and (likes == 0):
+        if len(pure_numbers) == 2:
+            return (parse_num(pure_numbers[0]), parse_num(pure_numbers[1]), 0)
+        elif len(pure_numbers) == 1:
+            return (0, 0, parse_num(pure_numbers[0]))
+    return (reposts, comments, likes)
+
+def clean_html_preserve_emojis(html_str):
+    if not html_str:
+        return ''
+    import re
+    import html
+    text = re.sub('<img[^>]*?alt=["\\\'](\\[[^"\\\'\\]]+\\])["\\\'][^>]*?>', '\\1', html_str)
+    text = re.sub('<[^>]+>', '', text)
+    return html.unescape(text).strip()
+
+builtins.print = verbose_print
